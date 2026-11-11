@@ -1,0 +1,1860 @@
+<!doctype html>
+<!--
+  Burner dashboard for an ecoMAX boiler controller behind an ecoNET300 module.
+  Served by the module itself:  /www/econet/client/dash.html  ->  http://<module>/dash.html
+  It calls the module's /econet API on the same origin with the browser's ecoNET login.
+  Texts come from the module's translation files (translate_EN.js, translate_PL.js) and
+  translate_SL.js, which has to sit next to this page; `?lang=sl|en|pl` picks a language.
+  The Schedule tab needs the module's econet-sched service at /schedule (module/econet-sched).
+  A rise of the fuel level asks how many bags were added and logs them through the n8n webhook
+  of refills.html (docs/refill-log.md).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Burner dashboard</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #fff; --text: #1d2228; --muted: #6b7480; --line: #e3e6ea;
+    --off: #8a939e; --start: #c98a12; --run: #1f9d55; --stop: #3a7bd5; --alarm: #d64545;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14171b; --card: #1d2127; --text: #e6e9ed; --muted: #9aa3ad; --line: #2c3239; color-scheme: dark; }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+  .headright { display: flex; align-items: center; gap: 12px; }
+  .langs { display: flex; gap: 4px; }
+  .langs button { padding: 4px 9px; font-size: 13px; }
+  .langs button.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 15px; margin: 0; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  h3 { font-size: 14px; margin: 18px 0 4px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  a { color: inherit; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-top: 16px; }
+  .cardhead { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+  .banner { display: none; margin-top: 16px; padding: 10px 14px; border-radius: 8px; background: var(--alarm); color: #fff; }
+  .warnings > div { margin-top: 12px; padding: 10px 14px; border-radius: 8px; background: var(--start); color: #fff; }
+  .warnings > div.bad { background: var(--alarm); }
+  tr.active td { color: var(--alarm); font-weight: 600; }
+  .state { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 12px; }
+  .badge { font-size: 22px; font-weight: 700; padding: 6px 14px; border-radius: 8px; color: #fff; background: var(--off); }
+  .badge.start { background: var(--start); } .badge.run { background: var(--run); }
+  .badge.stop { background: var(--stop); } .badge.alarm { background: var(--alarm); }
+  .big { font-size: 34px; font-weight: 700; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .tile .v { font-size: 20px; font-weight: 600; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--off); margin-right: 6px; }
+  .dot.on { background: var(--run); }
+  .bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; margin-top: 6px; }
+  .bar > div { height: 100%; background: var(--run); }
+  .bar.low > div { background: var(--alarm); }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--card); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--run); border-color: var(--run); color: #fff; }
+  button.danger { background: var(--alarm); border-color: var(--alarm); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  input { font: inherit; padding: 7px 9px; border-radius: 8px; border: 1px solid var(--line);
+          background: var(--bg); color: var(--text); width: 110px; }
+  input:disabled { opacity: .5; }
+  input[type="checkbox"] { width: auto; padding: 0; }
+  select { font: inherit; padding: 7px 9px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--bg); color: var(--text); }
+  .day { padding: 4px 7px; font-size: 13px; margin: 0 2px 2px 0; }
+  .day.on { background: var(--run); border-color: var(--run); color: #fff; }
+  .sched input[type="number"] { width: 50px; }
+  .sched select { max-width: 12em; text-overflow: ellipsis; }
+  .sched [data-valuebox], .sched [data-waitbox] { display: inline-block; white-space: nowrap; margin-top: 4px; }
+  .toggle { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; cursor: pointer; }
+  .schedoff table { opacity: .5; }
+  .sched tr.ruleoff td:not(:first-child) { opacity: .45; }
+  .search { width: 100%; max-width: 320px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border: 1px solid var(--line);
+          border-radius: 999px; font-size: 13px; cursor: pointer; user-select: none; }
+  .chip:has(input:checked) { border-color: var(--run); }
+  .watch td { white-space: nowrap; } .watch td.running { white-space: normal; min-width: 16em; }
+  .watch .up { color: var(--run); } .watch .down { color: var(--muted); }
+  .pw { width: 160px; }
+  .lockstate { font-weight: 600; }
+  .lockstate.open { color: var(--start); }
+  .tablewrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 6px; border-top: 1px solid var(--line); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 600; border-top: 0; }
+  td.nowrap { white-space: nowrap; }
+  .key { color: var(--muted); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); max-width: 90%;
+           background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 8px; display: none; }
+  pre { white-space: pre-wrap; font-size: 12px; }
+  button.small { padding: 4px 9px; font-size: 13px; }
+  button.due { border-color: var(--start); color: var(--start); font-weight: 600; }
+  dialog { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+           padding: 16px; width: min(26rem, calc(100% - 32px)); }
+  dialog::backdrop { background: rgba(0, 0, 0, .45); }
+  dialog h3 { margin: 0 0 6px; font-size: 17px; }
+  dialog .field { margin-top: 12px; }
+  dialog label { display: block; font-weight: 600; margin-bottom: 4px; }
+  dialog .field input { width: 100%; }
+  dialog .field input#refillBags { width: 6em; }
+  dialog details { margin-top: 14px; }
+  dialog summary { cursor: pointer; color: var(--muted); }
+  dialog .controls { justify-content: flex-end; margin-top: 16px; }
+  .refillmsg { margin: 12px 0 0; color: var(--alarm); }
+  .refillmsg:empty { display: none; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 24px; border-bottom: 1px solid var(--line); }
+  .tabs button { border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0;
+                 background: transparent; color: var(--muted); }
+  .tabs button.on { background: var(--card); border-color: var(--line); color: var(--text);
+                    font-weight: 600; margin-bottom: -1px; padding-bottom: 9px; }
+  .tabpanel { margin-top: 0; border-top: 0; border-radius: 0 0 10px 10px; }
+  /* Burner scene, modelled on the panel's main screen */
+  .scenewrap { overflow-x: auto; margin-top: 12px; }
+  .scene { display: block; width: 100%; min-width: 560px; height: auto; font-family: inherit; }
+  .scene .line { fill: var(--card); stroke: var(--muted); stroke-width: 2; stroke-linejoin: round; }
+  .scene .line.start { stroke: var(--start); } .scene .line.run { stroke: var(--run); }
+  .scene .line.stop { stroke: var(--stop); } .scene .line.alarm { stroke: var(--alarm); }
+  .scene .on .line, .scene .line.on { stroke: var(--run); }
+  .scene .unknown .line { stroke-dasharray: 5 4; }
+  .scene .val { fill: var(--text); font-size: 15px; font-weight: 600; }
+  .scene .cap { fill: var(--muted); font-size: 11px; }
+  .scene .fuel { fill: var(--run); opacity: .35; } .scene .fuel.low { fill: var(--alarm); opacity: .5; }
+  .scene .pellet { fill: var(--start); opacity: .8; }
+  .scene .auger { fill: none; stroke: var(--muted); stroke-width: 2; }
+  .scene .on .auger { stroke: var(--run); }
+  .scene .blade { fill: var(--muted); opacity: .8; } .scene .on .blade { fill: var(--run); }
+  .scene .chamber { fill: var(--bg); stroke: var(--muted); stroke-width: 2; }
+  .scene .igniter { fill: var(--line); } .scene .igniter.on { fill: #ff5a1f; animation: glow .7s ease-in-out infinite alternate; }
+  .scene .spin { animation: spin var(--dur, 1s) linear infinite; }
+  .scene .slide10 { animation: slide10 .6s linear infinite; }
+  .scene .rib { fill: none; stroke: var(--muted); stroke-width: 1.5; opacity: .55; }
+  .scene .on .rib { stroke: var(--run); opacity: .9; } .scene .unknown .rib { stroke-dasharray: 3 3; }
+  .scene .roll10 { animation: roll10 1.6s linear infinite; }
+  .scene .slide14 { animation: slide14 .9s linear infinite; }
+  .scene .fall { animation: fall .5s linear infinite; }
+  .scene .flicker { animation: flicker .3s ease-in-out infinite alternate; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes slide10 { to { transform: translateX(10px); } }
+  @keyframes roll10 { to { transform: translateY(10px); } }
+  @keyframes slide14 { to { transform: translateX(14px); } }
+  @keyframes fall { to { transform: translateY(16px); } }
+  @keyframes flicker { 0% { transform: scale(1, 1); } 50% { transform: scale(1.06, .9); } 100% { transform: scale(.94, 1.07); } }
+  @keyframes glow { from { opacity: .45; } to { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .scene * { animation: none !important; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="title">Burner</h1>
+    <div class="headright">
+      <span class="muted" id="updated" data-i18n="dash_connecting">connecting…</span>
+      <div class="langs" id="langs">
+        <button data-lang="sl">SL</button><button data-lang="en">EN</button><button data-lang="pl">PL</button>
+      </div>
+    </div>
+  </header>
+  <div class="banner" id="banner"></div>
+  <div class="warnings" id="warnings"></div>
+
+  <section class="card">
+    <div class="cardhead" style="margin-bottom:0">
+      <h2 data-i18n="dash_state">State</h2>
+      <button class="small" id="btnRefill" data-i18n="dash_refill_btn">Log refill</button>
+    </div>
+    <div class="state">
+      <span class="badge" id="mode">–</span>
+      <span class="big" id="tempCO">–</span>
+      <span class="muted" id="targets"></span>
+    </div>
+    <div class="scenewrap">
+    <svg class="scene" id="scene" viewBox="0 0 800 300" role="img" aria-label="Burner">
+      <defs>
+        <clipPath id="clipTank"><rect x="22" y="52" width="106" height="196" rx="6"/></clipPath>
+        <clipPath id="clipTube"><rect x="0" y="-11" width="258" height="22" rx="3"/></clipPath>
+        <clipPath id="clipDrop"><rect x="334" y="58" width="16" height="78"/></clipPath>
+        <clipPath id="clipHead"><rect x="302" y="58" width="32" height="18"/></clipPath>
+        <clipPath id="clipAuger"><rect x="352" y="166" width="150" height="20"/></clipPath>
+        <clipPath id="clipHearth"><rect x="472" y="150" width="50" height="50"/></clipPath>
+        <linearGradient id="flameGrad" x1="0" x2="1">
+          <stop offset="0" stop-color="#ffd76a"/><stop offset=".45" stop-color="#ff9a1f"/>
+          <stop offset="1" stop-color="#e2461e" stop-opacity=".15"/>
+        </linearGradient>
+      </defs>
+
+      <!-- fuel tank -->
+      <g id="sTank"><title></title>
+        <rect class="line" x="20" y="50" width="110" height="200" rx="8"/>
+        <g clip-path="url(#clipTank)"><rect class="fuel" id="sFuel" x="20" y="250" width="110" height="0"/></g>
+        <text class="val" id="sFuelTxt" x="75" y="40" text-anchor="middle">–</text>
+        <text class="cap" x="75" y="268" text-anchor="middle" data-i18n="fuelLevel">Fuel level</text>
+      </g>
+
+      <!-- outer feeder: tank to the burner's drop pipe -->
+      <g id="sOuter"><title></title>
+        <g transform="translate(116 236) rotate(-38)">
+          <rect class="line" x="0" y="-12" width="258" height="24" rx="4"/>
+          <g clip-path="url(#clipTube)"><g id="sOuterPellets"></g></g>
+        </g>
+        <rect class="line" x="300" y="56" width="52" height="22" rx="3"/>
+        <rect class="line" x="332" y="56" width="20" height="82"/>
+        <g clip-path="url(#clipHead)"><g id="sHeadPellets"></g></g>
+        <g clip-path="url(#clipDrop)"><g id="sDropPellets"></g></g>
+      </g>
+      <text class="val" id="sStream" x="362" y="80">–</text>
+      <text class="cap" x="362" y="96" data-i18n="fuelStream">Fuel stream</text>
+
+      <!-- burner body with its own feeder (auger), igniter and, with HEARTH_BITS, a rotating hearth -->
+      <g id="sBurner"><title></title>
+        <path class="line" id="sBody" d="M300 134 H470 V148 H524 V202 H470 V216 H300 Z"/>
+        <g id="sHearth"><title></title>
+          <g clip-path="url(#clipHearth)"><path class="rib" id="sHearthRibs" d=""/></g>
+        </g>
+        <g id="sFeeder"><title></title>
+          <rect class="line" x="352" y="166" width="150" height="20" rx="3"/>
+          <g clip-path="url(#clipAuger)"><path class="auger" id="sAuger" d=""/></g>
+        </g>
+        <rect class="line" x="524" y="152" width="14" height="46" rx="2"/>
+        <rect class="igniter" id="sIgniter" x="506" y="192" width="16" height="6" rx="2"><title></title></rect>
+        <text class="val" id="sFeedT" x="427" y="157" text-anchor="middle">–</text>
+      </g>
+
+      <!-- air fan -->
+      <g id="sFan"><title></title>
+        <circle class="line" cx="300" cy="175" r="44"/>
+        <g transform="translate(300 175)"><g id="sFanBlades">
+          <path class="blade" d="M0 0 C8 -9 26 -12 36 -4 C28 6 10 8 0 0 Z"/>
+          <path class="blade" transform="rotate(120)" d="M0 0 C8 -9 26 -12 36 -4 C28 6 10 8 0 0 Z"/>
+          <path class="blade" transform="rotate(240)" d="M0 0 C8 -9 26 -12 36 -4 C28 6 10 8 0 0 Z"/>
+          <circle class="line" r="5"/>
+        </g></g>
+        <text class="val" id="sFanTxt" x="300" y="242" text-anchor="middle">–</text>
+        <text class="cap" x="300" y="258" text-anchor="middle" data-i18n="fanPower">Fan output</text>
+      </g>
+
+      <!-- boiler: water jacket around the furnace, flue pipe, pumps -->
+      <g id="sBoiler"><title></title>
+        <rect class="line" x="720" y="8" width="28" height="36"/>
+        <rect class="line" id="sWater" x="544" y="40" width="234" height="230" rx="10"/>
+        <rect class="chamber" x="540" y="128" width="150" height="94" rx="6"/>
+        <text class="val" id="sBoilerT" x="768" y="80" text-anchor="end">–</text>
+        <text class="cap" id="sBoilerSet" x="768" y="96" text-anchor="end"></text>
+        <text class="cap" x="768" y="112" text-anchor="end" data-i18n="boiler">Boiler</text>
+        <text class="val" id="sFlue" x="710" y="24" text-anchor="end">–</text>
+        <text class="cap" x="710" y="38" text-anchor="end" data-i18n="tempFlueGas">Flue gas temperature</text>
+      </g>
+      <g id="sPumpCO"><title></title>
+        <circle class="line" cx="600" cy="246" r="14"/>
+        <g transform="translate(600 246)"><g class="impeller"><path class="auger" d="M0 0 L0 -9 M0 0 L8 5 M0 0 L-8 5"/></g></g>
+        <text class="cap" x="600" y="288" text-anchor="middle" id="sPumpCOTxt"></text>
+      </g>
+      <g id="sPumpCWU"><title></title>
+        <circle class="line" cx="690" cy="246" r="14"/>
+        <g transform="translate(690 246)"><g class="impeller"><path class="auger" d="M0 0 L0 -9 M0 0 L8 5 M0 0 L-8 5"/></g></g>
+        <text class="cap" x="690" y="288" text-anchor="middle" id="sPumpCWUTxt"></text>
+      </g>
+
+      <!-- flame, sized by output, flickering -->
+      <g id="sFlame" transform="translate(540 175)"><title></title>
+        <g id="sFlameSize"><g class="flicker">
+          <path fill="url(#flameGrad)" d="M0 -16 C30 -27 72 -24 116 -4 C122 0 122 0 116 4 C72 24 30 27 0 16 Z"/>
+          <path fill="#fff3c4" opacity=".75" d="M0 -8 C22 -13 48 -10 74 -2 C78 0 78 0 74 2 C48 10 22 13 0 8 Z"/>
+        </g></g>
+      </g>
+      <text class="val" id="sFlameTxt" x="558" y="66">–</text>
+      <text class="cap" x="558" y="80" data-i18n="tempOpticalSensor">Flame</text>
+      <text class="val" id="sPower" x="558" y="104">–</text>
+      <text class="cap" x="558" y="118" data-i18n="boilerPower">Boiler output</text>
+    </svg>
+    </div>
+    <div class="grid" id="tiles"></div>
+  </section>
+
+  <section class="card">
+    <div class="cardhead"><h2 data-i18n="boiler_control">Boiler control</h2></div>
+    <div class="controls">
+      <button class="primary" id="btnOn" data-i18n="dash_turn_on">Turn on</button>
+      <button class="danger" id="btnOff" data-i18n="dash_turn_off">Turn off</button>
+      <button id="btnOffAfter" data-i18n="dash_off_after" hidden>Turn off after cycle</button>
+      <span style="flex:1"></span>
+      <label for="setpoint" data-i18n="CO_TEMP_SET">Boiler target</label>
+      <input type="number" id="setpoint" step="1">
+      <span class="muted" id="setpointRange"></span>
+      <button id="btnSet" data-i18n="dash_set">Set</button>
+    </div>
+    <div class="controls" id="offPending" style="margin-top:10px" hidden>
+      <span class="muted" id="offPendingTxt"></span>
+      <button id="btnOffCancel" data-i18n="cancel">Cancel</button>
+    </div>
+  </section>
+
+  <nav class="tabs" id="tabs">
+    <button data-tab="alarms" data-i18n="alarms">Alarms</button>
+    <button data-tab="user" data-i18n="user_parameters">User parameters</button>
+    <button data-tab="schedule" data-i18n="schedule">Schedule</button>
+    <button data-tab="service" data-i18n="service_parameters">Service parameters</button>
+    <button data-tab="module" data-i18n="dash_module">Module</button>
+    <button data-tab="data" data-i18n="data">Current data</button>
+    <button data-tab="watch" data-i18n="dash_watch">Output log</button>
+  </nav>
+
+  <section class="card tabpanel" data-panel="alarms">
+    <div class="tablewrap" id="alarms"><p class="muted">…</p></div>
+  </section>
+
+  <section class="card tabpanel" data-panel="user" hidden>
+    <div class="cardhead">
+      <input class="search filter" data-i18n-ph="dash_filter" placeholder="Filter all parameters">
+    </div>
+    <div class="tablewrap" id="userParams"></div>
+  </section>
+
+  <section class="card tabpanel" data-panel="schedule" hidden>
+    <div class="cardhead">
+      <div class="controls">
+        <label class="toggle"><input type="checkbox" id="schedEnabled" disabled>
+          <span data-i18n="dash_sched_enabled">Schedule on</span></label>
+        <span class="muted" id="schedClock"></span>
+        <a href="plan.html" data-i18n="dash_plan_link">Week overview →</a>
+      </div>
+      <div class="controls">
+        <span class="muted" id="schedDirty" data-i18n="dash_sched_unsaved" hidden>Unsaved changes</span>
+        <button id="schedAdd" data-i18n="addRecord">Add record</button>
+        <button class="primary" id="schedSave" data-i18n="save" disabled>Save</button>
+      </div>
+    </div>
+    <div class="warnings" id="schedWarn"></div>
+    <div class="tablewrap" id="schedRows"><p class="muted">…</p></div>
+    <p class="muted" data-i18n="dash_sched_note"></p>
+    <h3 data-i18n="dash_sched_runs">Recent runs</h3>
+    <div class="tablewrap" id="schedRuns"></div>
+  </section>
+
+  <section class="card tabpanel" data-panel="service" hidden>
+    <div class="cardhead">
+      <input class="search filter" data-i18n-ph="dash_filter" placeholder="Filter all parameters">
+      <div class="controls">
+        <span class="lockstate" id="lockState">Locked</span>
+        <input class="pw" type="password" id="servicePw" data-i18n-ph="dash_service_pw" placeholder="Service password" autocomplete="off">
+        <button id="btnUnlock" data-i18n="dash_unlock">Unlock</button>
+        <button id="btnLock" data-i18n="dash_lock" hidden>Lock</button>
+      </div>
+    </div>
+    <p class="muted" style="margin:0" data-i18n="dash_service_note"></p>
+    <div id="serviceParams"></div>
+  </section>
+
+  <section class="card tabpanel" data-panel="module" hidden>
+    <div class="grid" id="module" style="margin-top:0"></div>
+  </section>
+
+  <section class="card tabpanel" data-panel="data" hidden>
+    <pre id="raw" style="margin:0"></pre>
+  </section>
+
+  <!-- a row each time the state or an output changes, like econet-status --watch on the module -->
+  <section class="card tabpanel" data-panel="watch" hidden>
+    <div class="cardhead">
+      <span class="muted" id="watchInfo"></span>
+      <div class="controls">
+        <button id="watchAll" data-i18n="dash_w_all">All</button>
+        <button id="watchNone" data-i18n="dash_w_none">None</button>
+        <button id="watchClear" data-i18n="dash_w_clear">Clear</button>
+        <button id="watchSave" data-i18n="dash_w_download">Download</button>
+      </div>
+    </div>
+    <div class="chips" id="watchFilters"></div>
+    <div class="tablewrap watch" id="watchRows"></div>
+    <p class="muted" data-i18n="dash_w_note"></p>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<!-- hopper refill: asked when the fuel level rises, logged through the n8n webhook of refills.html -->
+<dialog id="refill" aria-labelledby="refillTitle">
+  <form id="refillForm" novalidate>
+    <h3 id="refillTitle" data-i18n="dash_refill_title">Hopper refill</h3>
+    <p class="muted" id="refillWhy" style="margin:0"></p>
+    <div class="field">
+      <label for="refillBags" data-i18n="dash_refill_ask">How many bags did you add?</label>
+      <input type="number" id="refillBags" min="1" max="100" step="1" inputmode="numeric" required>
+      <span class="muted" id="refillKg"></span>
+    </div>
+    <div class="field">
+      <label for="refillTime" data-i18n="dash_refill_time">Time</label>
+      <input type="datetime-local" id="refillTime" step="60">
+    </div>
+    <details id="refillCfg">
+      <summary data-i18n="dash_refill_cfg">Refill log (n8n webhook)</summary>
+      <div class="field">
+        <label for="refillUrl" data-i18n="dash_refill_url">Webhook URL</label>
+        <input type="url" id="refillUrl" placeholder="https://n8n.example.com/webhook/refills" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="refillToken" data-i18n="dash_refill_token">Token (X-Token)</label>
+        <input type="password" id="refillToken" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="refillKgPer" data-i18n="dash_refill_kg">Bag weight (kg)</label>
+        <input type="number" id="refillKgPer" min="0.5" max="100" step="0.5" inputmode="decimal">
+      </div>
+      <p class="muted" data-i18n="dash_refill_cfg_note"></p>
+    </details>
+    <p class="refillmsg" id="refillMsg" role="alert"></p>
+    <div class="controls">
+      <button type="button" id="refillSkip">Skip</button>
+      <button type="submit" class="primary" id="refillSave">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+// Outputs bits that turn a rotating hearth, e.g. 0x10 | 0x100 on a Pellas X REVO: 0x10 in operation,
+// 0x100 in the panel's manual control (there the burner's own auger is also geared to the fan).
+// 0 = no hearth: 0x10 and 0x100 keep ecoNET's names (circulation pump, exhaust fan), no hearth is
+// drawn and the burner's auger moves with the feeder. module/econet-status has the same setting.
+const HEARTH_BITS = 0;
+
+// Mode numbers as ecoMAX controllers report them (0, 2, 3, 4, 6, 7, 12 confirmed against a panel;
+// the rest follow ecoNET's own label order). Names come from the translation files.
+const MODE_KEYS = ["modeTurnOff", "modeStop", "modeKindle", "modeWork", "modeSupervision", "modeHalt",
+  "modeCleaning", "modeExtinction", "modeAlarm", "modeManual", "modeUnsealing", "modeOther",
+  "modeStabilization", "modePurge", "modeCheckFlame", "modeFlameLosing", "modePrevention",
+  "modeWorkGrate", "modeSupervisionGrate", "modeCalibration", "modeChimneySweep", "modeOpenDoor"];
+const MODE_CLASS = { 0: "", 2: "start", 6: "start", 12: "start", 13: "start", 14: "start",
+  3: "run", 4: "run", 17: "run", 18: "run", 7: "stop", 1: "stop", 5: "stop", 8: "alarm", 15: "alarm" };
+// Unit codes of editParams, inferred from the parameter values and labels.
+const UNITS = { 1: "°C", 2: "s", 3: "min", 4: "h", 6: "%", 11: "kg/h", 14: "kWh/kg", 15: "rpm" };
+const ALARM_MODE = 8;
+// editParams "sec" codes: below 100 are user settings, from 100 up the service menu.
+const SERVICE_SECTION = 100;
+const GROUP_KEYS = { 100: "boiler", 102: "lighting", 104: "dash_group_fuel",
+  106: "extinction", 108: "cleaning", 110: "supervision" };
+const SETPOINT = "CO_TEMP_SET";
+const LIVE_MS = 5000, PARAMS_MS = 30000, SYS_MS = 60000;
+
+// Translation files: EN and PL ship with the module, SL is translate_SL.js next to this page.
+const LANG_FILES = { en: "/translate_EN.js", sl: "/translate_SL.js", pl: "/translate_PL.js" };
+// Texts of this page that have no counterpart in the translation files.
+const OWN = {
+  en: {
+    dash_state: "State", dash_turn_on: "Turn on", dash_turn_off: "Turn off", dash_set: "Set",
+    dash_value: "Value", dash_new_value: "New value", dash_duration: "Duration", dash_ongoing: "ongoing",
+    dash_unlock: "Unlock", dash_lock: "Lock", dash_locked: "Locked", dash_unlocked: "Unlocked",
+    dash_service_pw: "Service password",
+    dash_service_note: "These control combustion (airflow, ignition, burn-out). Change one at a time and watch a full cycle.",
+    dash_module: "Module",
+    dash_updated: "updated @time", dash_connecting: "connecting…",
+    dash_target: "target @value °C", dash_effective: "effective @value °C", dash_output: "@value % output",
+    dash_feeder: "Feeder", dash_ch_pump: "CH pump", dash_dhw_pump: "DHW pump",
+    dash_heat_demand: "heat demand", dash_satisfied: "satisfied",
+    dash_no_alarms: "No alarms recorded.",
+    dash_alarm_note: "Latest @shown of @total. Names follow PyPlumIO's ecoMAX alarm codes; only \"Power loss\" has been confirmed on a controller so far.",
+    dash_code: "code @code", dash_alarm_code: "Alarm code @code",
+    dash_no_match: "No matching parameters.", dash_filter: "Filter all parameters",
+    dash_section: "Section @sec", dash_group_fuel: "Fuel and feeder",
+    dash_open_wifi: "@ip, open network nobody configured",
+    dash_warn_alarm: "Alarm since @from: @name",
+    dash_warn_alarm_state: "The controller is in the Alarm state. Check the panel.",
+    dash_warn_wifi: "The module's Wi-Fi joined an open network that nobody configured (@ip). That bypasses the router's econet24 block; set the module's Wi-Fi to your own network.",
+    dash_warn_cloud: "The module is connected to econet24, which can push firmware updates to it.",
+    dash_enter_number: "Enter a number", dash_must_01: "Must be 0 or 1",
+    dash_unknown_param: "Unknown parameter @name", dash_read_only: "@name is read-only",
+    dash_unlock_first: "Unlock service settings first", dash_allowed_range: "Allowed range is @min–@max",
+    dash_confirm_set: "Set boiler target temperature to @value °C?",
+    dash_confirm_change: "Change \"@label\" from @old to @new?",
+    dash_sent: "Sent @name = @value, checking…", dash_now: "@name is now @value",
+    dash_still: "@name still reads @value — check the panel", dash_write_failed: "Write failed: @err",
+    dash_enter_pw: "Enter the service password",
+    dash_pw_not_read: "The module has not read the service password from the controller yet; try again in a minute",
+    dash_unlocked_toast: "Service settings unlocked", dash_unlock_failed: "Unlock failed: @err",
+    dash_cannot_read: "Cannot read the module: @err", dash_cannot_read_params: "Cannot read parameters: @err",
+    dash_lang_missing: "Translation file @file not found; showing English.",
+    dash_sched_action: "Action", dash_sched_clock: "Module time: @time",
+    dash_sched_note: "The module runs these at its own clock, also when no browser is open, and checks each value against the controller's range before sending it. The panel's night time reductions are separate and keep working.",
+    dash_sched_clock_bad: "The module's clock is wrong (@time), so entries would run at the wrong time. The module sets its clock over NTP; let it reach the internet.",
+    dash_sched_cron_off: "The module's scheduler (cron) is not running; save the schedule again to start it.",
+    dash_sched_missing: "The schedule service is not available on the module (@err). Install econet-sched (docs/schedule.md).",
+    dash_sched_empty: "No entries yet.", dash_sched_runs: "Recent runs",
+    dash_sched_no_runs: "Nothing has run since the module last started.",
+    dash_sched_unsaved: "Unsaved changes", dash_sched_saved: "Schedule saved",
+    dash_sched_row: "Row @row: @err", dash_sched_bad_time: "enter a time", dash_sched_pick_day: "pick at least one day",
+    dash_watch: "Output log", dash_w_all: "All", dash_w_none: "None", dash_w_clear: "Clear", dash_w_download: "Download",
+    dash_w_state: "State", dash_w_fan: "Fan", dash_w_hearth_manual: "Hearth (manual control)", dash_w_exhaust_fan: "Exhaust fan",
+    dash_w_time: "Time", dash_w_change: "Change", dash_w_on_now: "Running",
+    dash_w_boiler: "Boiler", dash_w_flame: "Flame", dash_w_fanpct: "Fan",
+    dash_w_start: "log started", dash_w_mode: "from @from after @dur", dash_w_up: "▲ @name (off @dur)", dash_w_down: "▼ @name (on @dur)",
+    dash_w_info: "@count changes, reading every @every while this tab is open (every 5 s otherwise)", dash_w_none_yet: "No changes yet.",
+    dash_w_noraw: "Without the \"outputs\" field (module/patch-outputs.py) only the outputs this firmware reports are seen.",
+    dash_w_note: "Like econet-status --watch on the module: a row when the state or an output changes, with how long the previous state lasted (≥ when it began before the log). The filters pick which changes show; Download saves the shown rows in the --watch format. The log lives in this browser window only and starts over on reload; durations are accurate to the reading interval.",
+    dash_igniter: "Igniter", dash_burner_feeder: "Burner feeder (turns with the fan)", dash_hearth: "Rotating hearth", dash_not_reported: "@name: not reported by this firmware",
+    dash_off_after: "Turn off after cycle", dash_sched_wait: "wait up to",
+    dash_confirm_off_after: "Turn the burner off when its current cycle ends (supervision, stopped or already burning off), at the latest in @min min?",
+    dash_off_after_started: "Waiting for the end of the cycle, at most @min min",
+    dash_off_pending: "Turns off after the cycle: waiting since @since, at the latest at @until.",
+    dash_off_cancelled: "Turning off after the cycle cancelled",
+    dash_sched_enabled: "Schedule on", dash_sched_now_on: "Schedule switched on", dash_sched_now_off: "Schedule switched off",
+    dash_sched_off_warn: "The schedule is switched off: no entry runs until you switch it on again. The entries are kept.",
+    dash_plan_link: "Week overview →",
+    dash_rule_on: "Rule at @time switched on", dash_rule_off: "Rule at @time switched off",
+    dash_rule_hint: "Switches this rule on or off at once", dash_rule_hint_new: "New rule: applies when you save",
+    dash_refill_btn: "Log refill", dash_refill_title: "Hopper refill",
+    dash_refill_rose: "The fuel level rose from @from % to @to % at @time.",
+    dash_refill_rose_between: "The fuel level rose from @from % to @to % between @since and @time.",
+    dash_refill_ask: "How many bags did you add?", dash_refill_time: "Time",
+    dash_refill_skip: "Skip", dash_refill_skip_hint: "Don't log this rise and don't ask about it again",
+    dash_refill_save_anyway: "Save anyway",
+    dash_refill_cfg: "Refill log (n8n webhook)", dash_refill_url: "Webhook URL", dash_refill_token: "Token (X-Token)",
+    dash_refill_kg: "Bag weight (kg)",
+    dash_refill_cfg_note: "Stored in this browser only. refills.html uses the same ones when it's served from the same address.",
+    dash_refill_need_cfg: "Enter the webhook URL and the token.", dash_refill_bad_url: "The webhook URL is not valid.",
+    dash_refill_bad_kg: "Bag weight: 0.5 to 100 kg.", dash_refill_bad_bags: "Bags: a whole number from 1 to 100.",
+    dash_refill_bad_time: "Enter a time.", dash_refill_bad_token: "Wrong token (X-Token).",
+    dash_refill_unreachable: "The webhook can't be reached (@url). Check the URL and that the workflow is active.",
+    dash_refill_saved: "Refill logged: @time, @bags (@kg kg)",
+    dash_refill_done: "The fuel level rose; the refill is already logged: @time, @bags",
+    dash_refill_dupe: "Meanwhile a refill was logged: @time, @bags. Save this one as well?",
+  },
+  sl: {
+    dash_state: "Stanje", dash_turn_on: "Vklopi", dash_turn_off: "Izklopi", dash_set: "Nastavi",
+    dash_value: "Vrednost", dash_new_value: "Nova vrednost", dash_duration: "Trajanje", dash_ongoing: "še traja",
+    dash_unlock: "Odkleni", dash_lock: "Zakleni", dash_locked: "Zaklenjeno", dash_unlocked: "Odklenjeno",
+    dash_service_pw: "Servisno geslo",
+    dash_service_note: "Ti parametri vplivajo na zgorevanje (ventilator, vžig, ugašanje). Spreminjajte enega po enega in opazujte cel cikel.",
+    dash_module: "Modul",
+    dash_updated: "posodobljeno @time", dash_connecting: "povezovanje…",
+    dash_target: "nastavljeno @value °C", dash_effective: "dejansko @value °C", dash_output: "@value % moči",
+    dash_feeder: "Dodajalnik", dash_ch_pump: "Črpalka CO", dash_dhw_pump: "Črpalka STV",
+    dash_heat_demand: "potreba po toploti", dash_satisfied: "brez potrebe",
+    dash_no_alarms: "Ni zabeleženih alarmov.",
+    dash_alarm_note: "Zadnjih @shown od @total. Imena so po kodah alarmov ecoMAX iz PyPlumIO; na regulatorju je zaenkrat potrjen samo \"Izpad napajanja\".",
+    dash_code: "koda @code", dash_alarm_code: "Koda alarma @code",
+    dash_no_match: "Ni ustreznih parametrov.", dash_filter: "Iskanje po vseh parametrih",
+    dash_section: "Sklop @sec", dash_group_fuel: "Gorivo in dodajalnik",
+    dash_open_wifi: "@ip, odprto omrežje, ki ga nihče ni nastavil",
+    dash_warn_alarm: "Alarm od @from: @name",
+    dash_warn_alarm_state: "Regulator je v stanju alarma. Preverite panel.",
+    dash_warn_wifi: "Wi-Fi modula se je povezal v odprto omrežje, ki ga nihče ni nastavil (@ip). Tako obide blokado econet24 na usmerjevalniku; nastavite Wi-Fi modula na svoje omrežje.",
+    dash_warn_cloud: "Modul je povezan z econet24, ki mu lahko vsili posodobitev programske opreme.",
+    dash_enter_number: "Vnesite število", dash_must_01: "Mora biti 0 ali 1",
+    dash_unknown_param: "Neznan parameter @name", dash_read_only: "@name je samo za branje",
+    dash_unlock_first: "Najprej odklenite servisne nastavitve", dash_allowed_range: "Dovoljeno območje je @min–@max",
+    dash_confirm_set: "Nastavim temperaturo kotla na @value °C?",
+    dash_confirm_change: "Spremenim \"@label\" z @old na @new?",
+    dash_sent: "Poslano @name = @value, preverjam…", dash_now: "@name je zdaj @value",
+    dash_still: "@name še vedno kaže @value — preverite panel", dash_write_failed: "Zapis ni uspel: @err",
+    dash_enter_pw: "Vnesite servisno geslo",
+    dash_pw_not_read: "Modul servisnega gesla še ni prebral iz regulatorja; poskusite čez minuto",
+    dash_unlocked_toast: "Servisne nastavitve so odklenjene", dash_unlock_failed: "Odklepanje ni uspelo: @err",
+    dash_cannot_read: "Branje modula ni uspelo: @err", dash_cannot_read_params: "Branje parametrov ni uspelo: @err",
+    dash_lang_missing: "Datoteke prevodov @file ni; prikazana je angleščina.",
+    dash_sched_action: "Dejanje", dash_sched_clock: "Čas modula: @time",
+    dash_sched_note: "Modul jih izvaja po svoji uri, tudi ko ni odprt noben brskalnik, in pred pošiljanjem preveri vsako vrednost glede na dovoljeno območje regulatorja. Nočna znižanja na panelu so ločena in delujejo naprej.",
+    dash_sched_clock_bad: "Ura modula je napačna (@time), zato bi se vnosi izvedli ob napačnem času. Modul nastavi uro prek NTP; omogočite mu dostop do interneta.",
+    dash_sched_cron_off: "Razporejevalnik na modulu (cron) ne teče; ponovno shranite urnik, da se zažene.",
+    dash_sched_missing: "Storitev za urnik na modulu ni na voljo (@err). Namestite econet-sched (docs/schedule.md).",
+    dash_sched_empty: "Ni še vnosov.", dash_sched_runs: "Zadnje izvedbe",
+    dash_sched_no_runs: "Od zadnjega zagona modula se ni izvedlo nič.",
+    dash_sched_unsaved: "Neshranjene spremembe", dash_sched_saved: "Urnik je shranjen",
+    dash_sched_row: "Vrstica @row: @err", dash_sched_bad_time: "vnesite čas", dash_sched_pick_day: "izberite vsaj en dan",
+    dash_watch: "Dnevnik izhodov", dash_w_all: "Vse", dash_w_none: "Nič", dash_w_clear: "Počisti", dash_w_download: "Prenesi",
+    dash_w_state: "Stanje", dash_w_fan: "Ventilator", dash_w_hearth_manual: "Kurišče (ročno upravljanje)", dash_w_exhaust_fan: "Odvodni ventilator",
+    dash_w_time: "Čas", dash_w_change: "Sprememba", dash_w_on_now: "Vklopljeno",
+    dash_w_boiler: "Kotel", dash_w_flame: "Plamen", dash_w_fanpct: "Ventilator",
+    dash_w_start: "začetek dnevnika", dash_w_mode: "iz @from po @dur", dash_w_up: "▲ @name (izklopljen @dur)", dash_w_down: "▼ @name (vklopljen @dur)",
+    dash_w_info: "@count sprememb, branje vsakih @every, ko je ta zavihek odprt (sicer vsakih 5 s)", dash_w_none_yet: "Še ni sprememb.",
+    dash_w_noraw: "Brez polja \"outputs\" (module/patch-outputs.py) so vidni le izhodi, ki jih ta programska oprema javlja.",
+    dash_w_note: "Kot econet-status --watch na modulu: vrstica ob vsaki spremembi stanja ali izhoda, s trajanjem prejšnjega stanja (≥, če se je začelo pred dnevnikom). Filtri izberejo, katere spremembe so prikazane; Prenesi shrani prikazane vrstice v obliki --watch. Dnevnik je samo v tem oknu brskalnika in se ob osvežitvi začne znova; trajanja so natančna na interval branja.",
+    dash_igniter: "Vžigalnik", dash_burner_feeder: "Dodajalnik v gorilniku (vrti se z ventilatorjem)", dash_hearth: "Vrtljivo kurišče", dash_not_reported: "@name: ta programska oprema tega ne sporoča",
+    dash_off_after: "Izklopi po koncu cikla", dash_sched_wait: "počakaj max",
+    dash_confirm_off_after: "Izklopim gorilnik, ko se trenutni cikel konča (nadzor, ustavljen ali že ugaša), najkasneje čez @min min?",
+    dash_off_after_started: "Čakam na konec cikla, max @min min",
+    dash_off_pending: "Izklop po koncu cikla: čaka od @since, najkasneje ob @until.",
+    dash_off_cancelled: "Izklop po koncu cikla je preklican",
+    dash_sched_enabled: "Urnik vklopljen", dash_sched_now_on: "Urnik je vklopljen", dash_sched_now_off: "Urnik je izklopljen",
+    dash_sched_off_warn: "Urnik je izklopljen: noben vnos se ne izvede, dokler ga spet ne vklopite. Vnosi ostanejo shranjeni.",
+    dash_plan_link: "Pregled tedna →",
+    dash_rule_on: "Pravilo ob @time je vklopljeno", dash_rule_off: "Pravilo ob @time je izklopljeno",
+    dash_rule_hint: "Takoj vklopi ali izklopi to pravilo", dash_rule_hint_new: "Novo pravilo: velja, ko shranite",
+    dash_refill_btn: "Vpiši polnjenje", dash_refill_title: "Polnjenje zalogovnika",
+    dash_refill_rose: "Nivo goriva je ob @time zrasel z @from % na @to %.",
+    dash_refill_rose_between: "Nivo goriva je med @since in @time zrasel z @from % na @to %.",
+    dash_refill_ask: "Koliko vreč ste dosuli?", dash_refill_time: "Čas",
+    dash_refill_skip: "Preskoči", dash_refill_skip_hint: "Tega dviga ne vpiši in ne sprašuj več zanj",
+    dash_refill_save_anyway: "Vseeno shrani",
+    dash_refill_cfg: "Dnevnik polnjenja (n8n webhook)", dash_refill_url: "URL webhooka", dash_refill_token: "Žeton (X-Token)",
+    dash_refill_kg: "Teža vreče (kg)",
+    dash_refill_cfg_note: "Shranjeno samo v tem brskalniku. refills.html uporablja iste, kadar je na istem naslovu.",
+    dash_refill_need_cfg: "Vpišite URL webhooka in žeton.", dash_refill_bad_url: "URL webhooka ni veljaven.",
+    dash_refill_bad_kg: "Teža vreče: od 0,5 do 100 kg.", dash_refill_bad_bags: "Vreče: celo število od 1 do 100.",
+    dash_refill_bad_time: "Vpišite čas.", dash_refill_bad_token: "Napačen žeton (X-Token).",
+    dash_refill_unreachable: "Webhook ni dosegljiv (@url). Preverite URL in ali je workflow aktiven.",
+    dash_refill_saved: "Polnjenje vpisano: @time, @bags (@kg kg)",
+    dash_refill_done: "Nivo goriva je zrasel; polnjenje je že vpisano: @time, @bags",
+    dash_refill_dupe: "Medtem je bilo polnjenje že vpisano: @time, @bags. Vpišem še to?",
+  },
+  pl: {
+    dash_state: "Stan", dash_turn_on: "Włącz", dash_turn_off: "Wyłącz", dash_set: "Ustaw",
+    dash_value: "Wartość", dash_new_value: "Nowa wartość", dash_duration: "Czas trwania", dash_ongoing: "trwa",
+    dash_unlock: "Odblokuj", dash_lock: "Zablokuj", dash_locked: "Zablokowane", dash_unlocked: "Odblokowane",
+    dash_service_pw: "Hasło serwisowe",
+    dash_service_note: "Te parametry wpływają na spalanie (nadmuch, rozpalanie, wygaszanie). Zmieniaj po jednym i obserwuj pełny cykl.",
+    dash_module: "Moduł",
+    dash_updated: "zaktualizowano @time", dash_connecting: "łączenie…",
+    dash_target: "zadana @value °C", dash_effective: "rzeczywista @value °C", dash_output: "@value % mocy",
+    dash_feeder: "Podajnik", dash_ch_pump: "Pompa CO", dash_dhw_pump: "Pompa CWU",
+    dash_heat_demand: "zapotrzebowanie na ciepło", dash_satisfied: "brak zapotrzebowania",
+    dash_no_alarms: "Brak zapisanych alarmów.",
+    dash_alarm_note: "Ostatnie @shown z @total. Nazwy według kodów alarmów ecoMAX z PyPlumIO; na regulatorze potwierdzono dotąd tylko \"Zanik zasilania\".",
+    dash_code: "kod @code", dash_alarm_code: "Kod alarmu @code",
+    dash_no_match: "Brak pasujących parametrów.", dash_filter: "Szukaj we wszystkich parametrach",
+    dash_section: "Sekcja @sec", dash_group_fuel: "Paliwo i podajnik",
+    dash_open_wifi: "@ip, otwarta sieć, której nikt nie skonfigurował",
+    dash_warn_alarm: "Alarm od @from: @name",
+    dash_warn_alarm_state: "Regulator jest w stanie alarmu. Sprawdź panel.",
+    dash_warn_wifi: "Wi-Fi modułu połączyło się z otwartą siecią, której nikt nie skonfigurował (@ip). Omija to blokadę econet24 na routerze; ustaw Wi-Fi modułu na własną sieć.",
+    dash_warn_cloud: "Moduł jest połączony z econet24, który może wymusić aktualizację oprogramowania.",
+    dash_enter_number: "Wpisz liczbę", dash_must_01: "Musi być 0 lub 1",
+    dash_unknown_param: "Nieznany parametr @name", dash_read_only: "@name jest tylko do odczytu",
+    dash_unlock_first: "Najpierw odblokuj parametry serwisowe", dash_allowed_range: "Dozwolony zakres to @min–@max",
+    dash_confirm_set: "Ustawić temperaturę kotła na @value °C?",
+    dash_confirm_change: "Zmienić \"@label\" z @old na @new?",
+    dash_sent: "Wysłano @name = @value, sprawdzam…", dash_now: "@name ma teraz wartość @value",
+    dash_still: "@name nadal pokazuje @value — sprawdź panel", dash_write_failed: "Zapis nie powiódł się: @err",
+    dash_enter_pw: "Wpisz hasło serwisowe",
+    dash_pw_not_read: "Moduł nie odczytał jeszcze hasła serwisowego z regulatora; spróbuj za minutę",
+    dash_unlocked_toast: "Parametry serwisowe odblokowane", dash_unlock_failed: "Odblokowanie nie powiodło się: @err",
+    dash_cannot_read: "Nie można odczytać modułu: @err", dash_cannot_read_params: "Nie można odczytać parametrów: @err",
+    dash_lang_missing: "Brak pliku tłumaczeń @file; wyświetlany jest angielski.",
+    dash_sched_action: "Akcja", dash_sched_clock: "Czas modułu: @time",
+    dash_sched_note: "Moduł wykonuje je według własnego zegara, także gdy żadna przeglądarka nie jest otwarta, i przed wysłaniem sprawdza każdą wartość z zakresem regulatora. Obniżenia nocne ustawione na panelu działają niezależnie.",
+    dash_sched_clock_bad: "Zegar modułu jest błędny (@time), więc wpisy wykonałyby się o złej porze. Moduł ustawia zegar przez NTP; zapewnij mu dostęp do internetu.",
+    dash_sched_cron_off: "Harmonogram zadań modułu (cron) nie działa; zapisz harmonogram ponownie, aby go uruchomić.",
+    dash_sched_missing: "Usługa harmonogramu nie jest dostępna na module (@err). Zainstaluj econet-sched (docs/schedule.md).",
+    dash_sched_empty: "Brak wpisów.", dash_sched_runs: "Ostatnie wykonania",
+    dash_sched_no_runs: "Od ostatniego uruchomienia modułu nic nie zostało wykonane.",
+    dash_sched_unsaved: "Niezapisane zmiany", dash_sched_saved: "Harmonogram zapisany",
+    dash_sched_row: "Wiersz @row: @err", dash_sched_bad_time: "wpisz godzinę", dash_sched_pick_day: "wybierz co najmniej jeden dzień",
+    dash_watch: "Dziennik wyjść", dash_w_all: "Wszystko", dash_w_none: "Nic", dash_w_clear: "Wyczyść", dash_w_download: "Pobierz",
+    dash_w_state: "Stan", dash_w_fan: "Wentylator", dash_w_hearth_manual: "Obrotnica (sterowanie ręczne)", dash_w_exhaust_fan: "Wentylator wyciągowy",
+    dash_w_time: "Czas", dash_w_change: "Zmiana", dash_w_on_now: "Włączone",
+    dash_w_boiler: "Kocioł", dash_w_flame: "Płomień", dash_w_fanpct: "Wentylator",
+    dash_w_start: "początek dziennika", dash_w_mode: "z @from po @dur", dash_w_up: "▲ @name (wyłączony @dur)", dash_w_down: "▼ @name (włączony @dur)",
+    dash_w_info: "@count zmian, odczyt co @every, gdy ta zakładka jest otwarta (inaczej co 5 s)", dash_w_none_yet: "Jeszcze brak zmian.",
+    dash_w_noraw: "Bez pola \"outputs\" (module/patch-outputs.py) widoczne są tylko wyjścia raportowane przez to oprogramowanie.",
+    dash_w_note: "Jak econet-status --watch na module: wiersz przy każdej zmianie stanu lub wyjścia, z czasem trwania poprzedniego stanu (≥, gdy zaczął się przed dziennikiem). Filtry wybierają pokazywane zmiany; Pobierz zapisuje pokazane wiersze w formacie --watch. Dziennik jest tylko w tym oknie przeglądarki i zaczyna się od nowa po odświeżeniu; czasy są dokładne do interwału odczytu.",
+    dash_igniter: "Zapalarka", dash_burner_feeder: "Podajnik palnika (obraca się z wentylatorem)", dash_hearth: "Obrotnica", dash_not_reported: "@name: to oprogramowanie tego nie raportuje",
+    dash_off_after: "Wyłącz po zakończeniu cyklu", dash_sched_wait: "czekaj maks.",
+    dash_confirm_off_after: "Wyłączyć palnik po zakończeniu bieżącego cyklu (nadzór, zatrzymanie lub już wygasza), najpóźniej za @min min?",
+    dash_off_after_started: "Czekam na koniec cyklu, maks. @min min",
+    dash_off_pending: "Wyłączenie po cyklu: czeka od @since, najpóźniej o @until.",
+    dash_off_cancelled: "Anulowano wyłączenie po cyklu",
+    dash_sched_enabled: "Harmonogram włączony", dash_sched_now_on: "Harmonogram włączony", dash_sched_now_off: "Harmonogram wyłączony",
+    dash_sched_off_warn: "Harmonogram jest wyłączony: żaden wpis się nie wykona, dopóki go nie włączysz. Wpisy zostają zachowane.",
+    dash_plan_link: "Podgląd tygodnia →",
+    dash_rule_on: "Reguła o @time włączona", dash_rule_off: "Reguła o @time wyłączona",
+    dash_rule_hint: "Od razu włącza lub wyłącza tę regułę", dash_rule_hint_new: "Nowa reguła: obowiązuje po zapisaniu",
+    dash_refill_btn: "Zapisz dosypanie", dash_refill_title: "Uzupełnienie zasobnika",
+    dash_refill_rose: "Poziom paliwa wzrósł o @time z @from % do @to %.",
+    dash_refill_rose_between: "Poziom paliwa wzrósł między @since a @time z @from % do @to %.",
+    dash_refill_ask: "Ile worków dosypano?", dash_refill_time: "Czas",
+    dash_refill_skip: "Pomiń", dash_refill_skip_hint: "Nie zapisuj tego wzrostu i nie pytaj o niego ponownie",
+    dash_refill_save_anyway: "Zapisz mimo to",
+    dash_refill_cfg: "Dziennik uzupełnień (webhook n8n)", dash_refill_url: "URL webhooka", dash_refill_token: "Token (X-Token)",
+    dash_refill_kg: "Waga worka (kg)",
+    dash_refill_cfg_note: "Zapisane tylko w tej przeglądarce. refills.html używa tych samych, gdy jest pod tym samym adresem.",
+    dash_refill_need_cfg: "Wpisz URL webhooka i token.", dash_refill_bad_url: "Nieprawidłowy URL webhooka.",
+    dash_refill_bad_kg: "Waga worka: od 0,5 do 100 kg.", dash_refill_bad_bags: "Worki: liczba całkowita od 1 do 100.",
+    dash_refill_bad_time: "Wpisz czas.", dash_refill_bad_token: "Nieprawidłowy token (X-Token).",
+    dash_refill_unreachable: "Webhook jest nieosiągalny (@url). Sprawdź URL i czy workflow jest aktywny.",
+    dash_refill_saved: "Dosypanie zapisane: @time, @bags (@kg kg)",
+    dash_refill_done: "Poziom paliwa wzrósł; dosypanie jest już zapisane: @time, @bags",
+    dash_refill_dupe: "W międzyczasie zapisano już dosypanie: @time, @bags. Zapisać także to?",
+  },
+};
+// Alarm codes as PyPlumIO names them for ecoMAX; only 0 (power loss) has been confirmed on a controller so far.
+const ALARM_NAMES = {
+  en: ["Power loss", "Boiler temperature sensor failure", "Boiler temperature too high",
+    "Feeder temperature sensor failure", "Feeder temperature too high", "Flue gas sensor failure",
+    "Flue gas temperature too high", "Firing up failed", "No fuel", "Leak detected", "Pressure sensor failure",
+    "Fan failure", "Insufficient air pressure", "Burning off failed", "Flame sensor failure",
+    "Linear actuator blocked", "Incorrect parameters", "Condensation warning", "Boiler safety thermostat tripped",
+    "Feeder safety thermostat tripped", "Water pressure too low", "Water pressure too high", "Feeder jammed",
+    "Flame went out", "Exhaust fan failure", "External feeder failure"],
+  sl: ["Izpad napajanja", "Okvara tipala temperature kotla", "Previsoka temperatura kotla",
+    "Okvara tipala temperature dodajalnika", "Previsoka temperatura dodajalnika", "Okvara tipala dimnih plinov",
+    "Previsoka temperatura dimnih plinov", "Vžig ni uspel", "Ni goriva", "Zaznano puščanje", "Okvara tipala tlaka",
+    "Okvara ventilatorja", "Premajhen tlak zraka", "Ugašanje ni uspelo", "Okvara senzorja plamena",
+    "Blokiran linearni pogon", "Napačni parametri", "Opozorilo kondenzacije", "Sprožil se je varnostni termostat kotla",
+    "Sprožil se je varnostni termostat dodajalnika", "Prenizek tlak vode", "Previsok tlak vode", "Zagozden dodajalnik",
+    "Plamen je ugasnil", "Okvara odvodnega ventilatorja", "Okvara zunanjega dodajalnika"],
+  pl: ["Zanik zasilania", "Uszkodzenie czujnika temperatury kotła", "Przekroczona temperatura kotła",
+    "Uszkodzenie czujnika temperatury podajnika", "Przekroczona temperatura podajnika", "Uszkodzenie czujnika spalin",
+    "Przekroczona temperatura spalin", "Nieudane rozpalanie", "Brak paliwa", "Wykryto wyciek",
+    "Uszkodzenie czujnika ciśnienia", "Awaria wentylatora", "Niewystarczające ciśnienie powietrza",
+    "Nieudane wygaszanie", "Uszkodzenie czujnika płomienia", "Zablokowany siłownik liniowy", "Nieprawidłowe parametry",
+    "Ostrzeżenie o kondensacji", "Zadziałał termostat bezpieczeństwa kotła", "Zadziałał termostat bezpieczeństwa podajnika",
+    "Za niskie ciśnienie wody", "Za wysokie ciśnienie wody", "Zablokowany podajnik", "Zgaśnięcie płomienia",
+    "Awaria wentylatora wyciągowego", "Awaria podajnika zewnętrznego"],
+};
+
+let params = {}, live = {}, sys = {};
+let lastUpdate = null;
+let filterText = "";  // shared by the filter fields of both parameter tabs
+// The module never checks the service password on writes, so this lock only guards
+// against accidental edits from this page, like the module's own web page does.
+let unlocked = false;
+window.trans = window.trans || {};  // the translation files assign trans["en"], trans["pl"], …
+let lang = "en";
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmt = (v, d = 1) => (typeof v === "number" ? (Number.isInteger(v) ? v : v.toFixed(d)) : (v ?? "–"));
+// The controller reports fuel level with an offset of 101 in some states (201 = 100 %),
+// and 255 when unknown; PyPlumIO decodes it the same way.
+const fuelPercent = (raw) => (raw == null || raw === 255 ? null : raw >= 101 ? raw - 101 : raw);
+const isService = (p) => (p.sec ?? 0) >= SERVICE_SECTION;
+
+// Text for a key in the current language: this page's own texts first, then the translation
+// files, then English, then the key itself. @name placeholders are filled from vars.
+function tr(key, vars) {
+  const pick = (l) => OWN[l]?.[key] ?? window.trans[l]?.[key];
+  let s = String(pick(lang) ?? pick("en") ?? key).trim();
+  for (const [k, v] of Object.entries(vars || {})) s = s.split("@" + k).join(String(v));
+  return s;
+}
+const label = (key, vars) => tr(key, vars).replace(/\s*:\s*$/, "");  // headings without "Label:" colons
+const heading = (key) => { const s = label(key); return s.charAt(0).toUpperCase() + s.slice(1); };
+
+// SHA-512 (FIPS 180-4) for comparing the service password with /econet/password.
+// WebCrypto is not available on plain http to the module, so it is done here.
+// The constants are derived as the standard defines them: the first 64 bits of the
+// fractional parts of the cube roots (K) and square roots (H0) of the first primes.
+const sha512Hex = (() => {
+  const M = (1n << 64n) - 1n;
+  const primes = [];
+  for (let n = 2; primes.length < 80; n++) if (primes.every((p) => n % p)) primes.push(n);
+  const iroot = (x, k) => {
+    const kb = BigInt(k);
+    let r = 1n << BigInt(Math.ceil(x.toString(2).length / k));
+    for (;;) {
+      const y = ((kb - 1n) * r + x / r ** (kb - 1n)) / kb;
+      if (y >= r) return r;
+      r = y;
+    }
+  };
+  const K = primes.map((p) => iroot(BigInt(p) << 192n, 3) & M);
+  const H0 = primes.slice(0, 8).map((p) => iroot(BigInt(p) << 128n, 2) & M);
+  const rotr = (x, n) => ((x >> n) | (x << (64n - n))) & M;
+  return (text) => {
+    const msg = new TextEncoder().encode(text);
+    const len = ((msg.length + 17 + 127) >> 7) << 7;
+    const buf = new Uint8Array(len);
+    buf.set(msg);
+    buf[msg.length] = 0x80;
+    const bits = BigInt(msg.length) * 8n;
+    for (let i = 0; i < 16; i++) buf[len - 1 - i] = Number((bits >> BigInt(8 * i)) & 0xffn);
+    const H = H0.slice(), W = new Array(80);
+    for (let off = 0; off < len; off += 128) {
+      for (let t = 0; t < 16; t++) {
+        let w = 0n;
+        for (let b = 0; b < 8; b++) w = (w << 8n) | BigInt(buf[off + t * 8 + b]);
+        W[t] = w;
+      }
+      for (let t = 16; t < 80; t++) {
+        const s0 = rotr(W[t - 15], 1n) ^ rotr(W[t - 15], 8n) ^ (W[t - 15] >> 7n);
+        const s1 = rotr(W[t - 2], 19n) ^ rotr(W[t - 2], 61n) ^ (W[t - 2] >> 6n);
+        W[t] = (W[t - 16] + s0 + W[t - 7] + s1) & M;
+      }
+      let [a, b, c, d, e, f, g, h] = H;
+      for (let t = 0; t < 80; t++) {
+        const t1 = (h + (rotr(e, 14n) ^ rotr(e, 18n) ^ rotr(e, 41n)) + ((e & f) ^ (~e & M & g)) + K[t] + W[t]) & M;
+        const t2 = ((rotr(a, 28n) ^ rotr(a, 34n) ^ rotr(a, 39n)) + ((a & b) ^ (a & c) ^ (b & c))) & M;
+        h = g; g = f; f = e; e = (d + t1) & M; d = c; c = b; b = a; a = (t1 + t2) & M;
+      }
+      [a, b, c, d, e, f, g, h].forEach((v, i) => (H[i] = (H[i] + v) & M));
+    }
+    return H.map((v) => v.toString(16).padStart(16, "0")).join("");
+  };
+})();
+
+// Absolute URLs from location.origin: fetch refuses relative URLs when the page was
+// opened with a login in its address (http://user:pass@host/...).
+const url = (path) => new URL(path, location.origin);
+
+async function api(path) {
+  const r = await fetch(url(path), { cache: "no-store", credentials: "same-origin" });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+function banner(msg) {
+  $("banner").textContent = msg || "";
+  $("banner").style.display = msg ? "block" : "none";
+}
+
+function toast(msg, ms = 4000) {
+  const t = $("toast");
+  t.textContent = msg; t.style.display = "block";
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => (t.style.display = "none"), ms);
+}
+
+// Load a translation file the way the module's own page does: as a script that fills trans[lang].
+function loadLang(l) {
+  if (window.trans[l]) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const s = document.createElement("script");
+    s.src = url(LANG_FILES[l]).href;
+    s.onload = () => resolve(!!window.trans[l]);
+    s.onerror = () => resolve(false);
+    document.head.appendChild(s);
+  });
+}
+
+function initialLang() {
+  const asked = new URLSearchParams(location.search).get("lang");
+  let stored = null;
+  try { stored = localStorage.getItem("dashLang"); } catch (e) { /* storage may be blocked */ }
+  const browser = (navigator.language || "").slice(0, 2);
+  return [asked, stored, browser].find((l) => l in LANG_FILES) || "en";
+}
+
+async function setLang(l) {
+  if (!(await loadLang(l)) && l !== "en") {
+    toast(tr("dash_lang_missing", { file: LANG_FILES[l] }), 6000);
+    l = "en";
+  }
+  lang = l;
+  try { localStorage.setItem("dashLang", l); } catch (e) { /* storage may be blocked */ }
+  document.documentElement.lang = l;
+  for (const b of document.querySelectorAll("[data-lang]")) b.classList.toggle("on", b.dataset.lang === l);
+  for (const el of document.querySelectorAll("[data-i18n]")) el.textContent = label(el.dataset.i18n);
+  for (const el of document.querySelectorAll("[data-i18n-ph]")) el.placeholder = label(el.dataset.i18nPh);
+  renderLock(); renderParams(); renderLive(); renderSys(); renderUpdated(); renderSchedRows(); renderSchedStatus();
+  watchChips = ""; renderWatch(); renderRefill(); markRefill();
+}
+
+// ---- Output log: like econet-status --watch, a row each time the state or an output changes ----
+const WATCH_MS = 1000, WATCH_MAX = 5000, WATCH_SHOW = 500;
+// The controller's outputs bits: export name as econet-status prints it, the flag firmware 3.2.3678
+// reports without patch-outputs.py, and the label here. With HEARTH_BITS, 0x10 and 0x100 are the hearth's.
+const WATCH_BITS = [
+  [0x01, "fan", "fanWorks", "dash_w_fan"], [0x02, "feeder", "feederWorks", "dash_feeder"],
+  [0x04, "CH-pump", "pumpCOWorks", "dash_ch_pump"], [0x08, "DHW-pump", "pumpCWUWorks", "dash_dhw_pump"],
+  HEARTH_BITS & 0x10 ? [0x10, "hearth", "pumpCirculationWorks", "dash_hearth"]
+    : [0x10, "circ-pump", "pumpCirculationWorks", "CIRCULATION_PUMP_ECOMAX"],
+  [0x20, "igniter", "lighterWorks", "dash_igniter"], [0x40, "alarm"], [0x80, "outer-boiler"],
+  HEARTH_BITS & 0x100 ? [0x100, "hearth-manual", null, "dash_w_hearth_manual"] : [0x100, "exhaust-fan", null, "dash_w_exhaust_fan"],
+  [0x200, "feeder2-additional"], [0x400, "feeder-outer", "feederOuterWorks"], [0x800, "solar-pump", "pumpSolarWorks"],
+  [0x1000, "fireplace-pump", "pumpFireplaceWorks"], [0x2000, "GZC", "contactGZCActive"],
+  [0x4000, "blow-fan1"], [0x8000, "blow-fan2"],
+].map(([bit, name, flag, key]) => ({ bit, name, flag, id: "b" + bit,
+  label: () => (key ? tr(key) : `${name} (0x${bit.toString(16)})`) }));
+// filter chips always offered; other bits get one once they change
+const WATCH_CHIPS = ["mode", "b1", "b2", "b16", "b32", "b4", "b8", "b256", "b64", "b512"];
+// econet-status's English state names, for the download
+const WATCH_MODES_EN = ["Off", "Stopped", "Fire up", "Work", "Supervision", "Halted", "Cleaning", "Burning off",
+  "Alarm", "Manual", "Unsealing", "Other", "Stabilization", "Purge", "Check flame", "Flame extinguished",
+  "Prevention", "Work grate", "Supervision grate", "Calibration", "Chimney sweep", "Open door"];
+
+let watchLog = [], watchPrev = null, watchSince = {}, watchStart = null, watchChips = "";
+let watchSel = new Set(WATCH_CHIPS.concat(WATCH_BITS.map((b) => b.id)));
+try {
+  const saved = JSON.parse(localStorage.getItem("dashWatchFilter"));
+  if (Array.isArray(saved)) watchSel = new Set(saved);
+} catch (e) { /* storage may be blocked */ }
+
+const watchMode = (m) => `${MODE_KEYS[m] ? label(MODE_KEYS[m]) : "mode"} (${m})`;
+function watchDur(ms, since) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  const t = s < 120 ? `${s} s` : s < 3600 ? `${Math.floor(s / 60)} min ${s % 60} s`
+    : `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
+  return since === watchStart ? "≥ " + t : t;  // began before the log did
+}
+
+function recordWatch(c) {
+  if (typeof c.mode !== "number") return;
+  const raw = typeof c.outputs === "number";
+  let o = raw ? c.outputs : 0;
+  if (!raw) for (const b of WATCH_BITS) if (b.flag && c[b.flag] === true) o |= b.bit;
+  const t = new Date(), changes = [];
+  if (!watchPrev) {
+    watchStart = t;
+    for (const k of ["mode", ...WATCH_BITS.map((b) => b.id)]) watchSince[k] = t;
+    changes.push({ key: "start" });
+  } else {
+    if (c.mode !== watchPrev.mode) changes.push({ key: "mode", from: watchPrev.mode, dur: watchDur(t - watchSince.mode, watchSince.mode) });
+    for (const b of WATCH_BITS) {
+      if (!((o ^ watchPrev.o) & b.bit)) continue;
+      changes.push({ key: b.id, on: !!(o & b.bit), dur: watchDur(t - watchSince[b.id], watchSince[b.id]) });
+    }
+  }
+  watchPrev = { mode: c.mode, o };
+  if (!changes.length) return;
+  for (const ch of changes) watchSince[ch.key] = t;
+  watchLog.push({ t, mode: c.mode, o, raw, changes, co: c.tempCO, flame: c.tempOpticalSensor, fan: c.fanPower });
+  if (watchLog.length > WATCH_MAX) watchLog.splice(0, watchLog.length - WATCH_MAX);
+  if (tabOpen("watch")) renderWatch();
+}
+
+const watchShown = (e) => e.changes.some((ch) => ch.key === "start" || watchSel.has(ch.key));
+const watchOn = (o) => WATCH_BITS.filter((b) => o & b.bit);
+
+function renderWatch() {
+  // chips: re-drawn only when their set or the language changes, so a click never lands on a replaced box
+  const seen = new Set(watchLog.flatMap((e) => e.changes.map((ch) => ch.key)));
+  const keys = WATCH_CHIPS.concat(WATCH_BITS.map((b) => b.id).filter((k) => !WATCH_CHIPS.includes(k) && seen.has(k)));
+  if (keys.join() !== watchChips) {
+    watchChips = keys.join();
+    $("watchFilters").innerHTML = keys.map((k) => {
+      const name = k === "mode" ? tr("dash_w_state") : WATCH_BITS.find((b) => b.id === k).label();
+      return `<label class="chip"><input type="checkbox" data-wf="${k}" ${watchSel.has(k) ? "checked" : ""}>${esc(name)}</label>`;
+    }).join("");
+  }
+  const raw = !watchLog.length || watchLog[watchLog.length - 1].raw;
+  $("watchInfo").textContent = tr("dash_w_info", { count: Math.max(0, watchLog.length - 1), every: `${WATCH_MS / 1000} s` })
+    + (raw ? "" : " · " + tr("dash_w_noraw"));
+
+  const rows = [];
+  for (let i = watchLog.length - 1; i >= 0 && rows.length < WATCH_SHOW; i--) if (watchShown(watchLog[i])) rows.push(watchLog[i]);
+  if (!rows.length) { $("watchRows").innerHTML = `<p class="muted">${esc(tr("dash_w_none_yet"))}</p>`; return; }
+  const change = (ch) => {
+    if (ch.key === "start") return `<span class="muted">${esc(tr("dash_w_start"))}</span>`;
+    if (ch.key === "mode") return esc(`${tr("dash_w_state")}: ${tr("dash_w_mode", { from: watchMode(ch.from), dur: ch.dur })}`);
+    const name = WATCH_BITS.find((b) => b.id === ch.key).label();
+    return `<span class="${ch.on ? "up" : "down"}">${esc(tr(ch.on ? "dash_w_up" : "dash_w_down", { name, dur: ch.dur }))}</span>`;
+  };
+  $("watchRows").innerHTML = `<table><tr><th>${esc(tr("dash_w_time"))}</th><th>${esc(tr("dash_w_state"))}</th>
+    <th>${esc(tr("dash_w_change"))}</th><th>${esc(tr("dash_w_boiler"))}</th><th>${esc(tr("dash_w_flame"))}</th>
+    <th>${esc(tr("dash_w_fanpct"))}</th><th>${esc(tr("dash_w_on_now"))}</th></tr>` +
+    rows.map((e) => `<tr><td>${esc(e.t.toLocaleTimeString(lang))}</td><td>${esc(watchMode(e.mode))}</td>
+      <td>${e.changes.filter((ch) => ch.key === "start" || watchSel.has(ch.key)).map(change).join("<br>")}</td>
+      <td>${esc(fmt(e.co))} °C</td><td>${esc(fmt(e.flame, 0))} %</td><td>${esc(fmt(e.fan, 0))} %</td>
+      <td class="running">${esc(watchOn(e.o).map((b) => b.label()).join(", ") || "–")}
+        <span class="key">${e.raw ? "0x" + e.o.toString(16).padStart(4, "0") : ""}</span></td></tr>`).join("") +
+    "</table>";
+}
+
+// the shown rows, oldest first, as econet-status --watch prints them
+function saveWatch() {
+  const two = (n) => String(n).padStart(2, "0");
+  const hms = (d) => `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+  const lines = watchLog.filter(watchShown).map((e) => {
+    const names = watchOn(e.o).map((b) => b.name).join(" ") || "none";
+    const word = e.raw ? `outputs 0x${e.o.toString(16).padStart(4, "0")}` : "flags";
+    return `${hms(e.t)}  ${WATCH_MODES_EN[e.mode] ?? "mode"} (${e.mode})  ${word}: ${names}`;
+  });
+  const d = new Date();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([lines.join("\n") + "\n"], { type: "text/plain" }));
+  a.download = `econet-watch-${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}-${hms(d).replaceAll(":", "")}.txt`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function setWatchSel(sel) {
+  watchSel = sel;
+  try { localStorage.setItem("dashWatchFilter", JSON.stringify([...watchSel])); } catch (e) { /* storage may be blocked */ }
+  watchChips = ""; renderWatch();
+}
+
+function showTab(name) {
+  const tabs = [...document.querySelectorAll("[data-tab]")].map((b) => b.dataset.tab);
+  if (!tabs.includes(name)) name = tabs[0];
+  for (const p of document.querySelectorAll("[data-panel]")) p.hidden = p.dataset.panel !== name;
+  for (const b of document.querySelectorAll("[data-tab]")) b.classList.toggle("on", b.dataset.tab === name);
+  try { localStorage.setItem("dashTab", name); } catch (e) { /* storage may be blocked */ }
+  if (name === "schedule") refreshSched();  // the schedule is only fetched while its tab is open
+  if (name === "watch") renderWatch();
+}
+const tabOpen = (name) => !document.querySelector(`[data-panel="${name}"]`).hidden;
+
+function renderUpdated() {
+  if (lastUpdate) $("updated").textContent = tr("dash_updated", { time: lastUpdate.toLocaleTimeString(lang) });
+}
+
+function tile(title, value, extra = "") {
+  return `<div class="tile"><div class="muted">${esc(title)}</div><div class="v">${value}</div>${extra}</div>`;
+}
+const onOff = (b) => `<span class="dot ${b ? "on" : ""}"></span>${esc(label(b ? "on" : "off"))}`;
+const has = (k) => live[k] !== undefined;
+
+function renderLive() {
+  const c = live;
+  const mode = c.mode;
+  $("mode").textContent = MODE_KEYS[mode] ? label(MODE_KEYS[mode]) : (mode === undefined ? "–" : `mode ${mode}`);
+  $("mode").className = "badge " + (MODE_CLASS[mode] ?? "");
+  $("tempCO").textContent = `${fmt(c.tempCO)} °C`;
+  const set = params[SETPOINT];
+  $("targets").textContent = `${tr("dash_target", { value: set ? set.value : "–" })} · ${tr("dash_effective", { value: fmt(c.tempCOSet) })}`;
+
+  const fuel = fuelPercent(c.fuelLevel);
+  const fuelBar = fuel == null ? "" :
+    `<div class="bar ${fuel < 15 ? "low" : ""}"><div style="width:${Math.max(0, Math.min(100, fuel))}%"></div></div>`;
+  // Firmware 3.2.3678 has no fan/feeder/igniter on-off flags; show only what the module reports.
+  const fanOn = has("fanWorks") ? c.fanWorks : (c.fanPower ?? 0) > 0;
+  $("tiles").innerHTML = [
+    tile(label("tempOpticalSensor"), fmt(c.tempOpticalSensor)),
+    tile(label("boilerPower"), `${fmt(c.boilerPowerKW)} kW`,
+      has("boilerPower") ? `<div class="muted">${esc(tr("dash_output", { value: fmt(c.boilerPower) }))}</div>` : ""),
+    tile(label("fanPower"), `${fmt(c.fanPower, 0)} %`, `<div class="muted">${onOff(fanOn)}</div>`),
+    has("feederWorks") ? tile(tr("dash_feeder"), onOff(c.feederWorks)) : "",
+    has("lighterWorks") ? tile(tr("dash_igniter"), onOff(c.lighterWorks)) : "",
+    HEARTH_BITS && has("outputs") ? tile(tr("dash_hearth"), onOff((c.outputs & HEARTH_BITS) !== 0)) : "",
+    has("fuelStream") ? tile(label("fuelStream"), `${fmt(c.fuelStream)} kg/h`) : "",
+    tile(label("fuelLevel"), `${fmt(fuel)} %`, fuelBar),
+    tile(label("tempFeeder"), `${fmt(c.tempFeeder)} °C`),
+    tile(label("CWU_SET_TEMP"), `${fmt(c.tempCWUSet)} °C`),
+    tile(tr("dash_ch_pump"), onOff(c.pumpCOWorks)),
+    tile(tr("dash_dhw_pump"), onOff(c.pumpCWUWorks)),
+    tile(label("termostat"), esc(tr(c.thermostat ? "dash_heat_demand" : "dash_satisfied"))),
+  ].join("");
+
+  $("btnOn").disabled = mode !== 0;
+  $("btnOff").disabled = mode === 0;
+  renderPending();
+  renderScene();
+  renderWarnings();
+  $("raw").textContent = JSON.stringify({ fuelPercentDecoded: fuel, live: c, module: {
+    controller: sys.controllerID, uid: sys.uid, firmware: sys.softVer,
+    moduleA: sys.moduleASoftVer, panel: sys.modulePanelSoftVer, cloud: sys.mainSrv,
+    alarms: (sys.alarms || []).slice(0, 5) } }, null, 2);
+}
+
+// Burner scene, modelled on the panel's main screen. What moves follows the controller's outputs.
+// Firmware 3.2.3678 reports the fan only as fanPower and doesn't report the feeder, igniter or the
+// outputs word at all; the fan and tank feeder are then inferred, the igniter and the rotating hearth
+// drawn dashed and still (docs/dashboard.md#firmware-patches has the module patch). The hearth is
+// drawn only with HEARTH_BITS set.
+const SVGNS = "http://www.w3.org/2000/svg";
+const FLAME_MIN = 10;  // tempOpticalSensor is ~0 without a flame and 40–90 with one
+function buildScene() {
+  const add = (parent, attrs) => {
+    const el = document.createElementNS(SVGNS, "circle");
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    parent.appendChild(el);
+  };
+  // one spacing of extra pellets/turns outside the clip, so the sliding loops without a jump
+  for (let x = -28; x < 272; x += 14) {
+    add($("sOuterPellets"), { class: "pellet", cx: x, cy: -4, r: 3.2 });
+    add($("sOuterPellets"), { class: "pellet", cx: x + 7, cy: 5, r: 3.2 });
+  }
+  for (let x = 290; x < 340; x += 14) add($("sHeadPellets"), { class: "pellet", cx: x, cy: 67, r: 3.2 });
+  for (let y = 40; y < 140; y += 16) add($("sDropPellets"), { class: "pellet", cx: 342, cy: y, r: 3.2 });
+  let d = "";
+  for (let x = 332; x < 520; x += 10) d += `M${x} 168 l5 8 l-5 8 `;
+  $("sAuger").setAttribute("d", d);
+  d = "";
+  for (let y = 110; y < 210; y += 10) d += `M472 ${y} l50 20 `;
+  $("sHearthRibs").setAttribute("d", d);
+  if (!HEARTH_BITS) $("sHearth").setAttribute("display", "none");
+}
+
+const setTitle = (id, text) => ($(id).querySelector("title").textContent = text);
+
+// The fan runs as one endless animation whose speed is changed with updatePlaybackRate(), which
+// keeps the current angle. Restarting a CSS animation with a new duration on every refresh made
+// the blades jump. Stopping pauses them where they are.
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+let fanAnim = null;
+function spinFan(on, fanPower) {
+  if (!fanAnim) {
+    fanAnim = $("sFanBlades").animate([{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }],
+                                      { duration: 1000, iterations: Infinity });
+    fanAnim.pause();
+  }
+  if (!on || reducedMotion.matches) { fanAnim.pause(); return; }
+  const turn = Math.min(6, Math.max(0.6, 60 / Math.max(fanPower, 1)));  // seconds per turn, faster with more air
+  if (fanAnim.updatePlaybackRate) fanAnim.updatePlaybackRate(1 / turn);
+  else fanAnim.playbackRate = 1 / turn;
+  if (fanAnim.playState !== "running") fanAnim.play();
+}
+
+// state: true, false, or null when the firmware doesn't report it
+function setOutput(id, state, name) {
+  $(id).classList.toggle("on", state === true);
+  $(id).classList.toggle("unknown", state === null);
+  setTitle(id, state === null ? tr("dash_not_reported", { name }) : `${name}: ${label(state ? "on" : "off")}`);
+}
+
+function renderScene() {
+  const c = live;
+  const reported = (k) => (k in c ? !!c[k] : null);
+  const fanPower = c.fanPower ?? 0, optical = c.tempOpticalSensor ?? 0, power = c.boilerPower ?? 0;
+  const fan = "fanWorks" in c ? !!c.fanWorks : fanPower > 0;
+  const feeder = reported("feederWorks");
+  // The controller's whole outputs word (patch-outputs.py) carries the rotating hearth's bits
+  const hearth = HEARTH_BITS && "outputs" in c ? (c.outputs & HEARTH_BITS) !== 0 : null;
+  // The tank feeder (left) is the controller's feeder output (0x02, feederWorks). Without the flag
+  // (3.2.3678 unpatched) it counts as running while the controller reports a feed rate.
+  const tank = feeder ?? (c.fuelStream ?? 0) > 0;
+
+  $("sBody").setAttribute("class", "line " + (MODE_CLASS[c.mode] ?? ""));
+  setTitle("sBurner", MODE_KEYS[c.mode] ? label(MODE_KEYS[c.mode]) : "–");
+
+  // more air turns the fan faster: one turn per 60/fanPower s
+  setOutput("sFan", fan, label("fanPower"));
+  spinFan(fan, fanPower);
+  $("sFanTxt").textContent = `${fmt(fanPower, 0)} %`;
+
+  // On a REVO (HEARTH_BITS set) the burner's own auger is geared to the fan (hybrid drive), so it turns
+  // whenever the fan does; otherwise it's drawn as part of the feeder and moves with it.
+  const auger = HEARTH_BITS ? fan : tank;
+  setOutput("sFeeder", auger, tr(HEARTH_BITS ? "dash_burner_feeder" : "dash_feeder"));
+  $("sAuger").classList.toggle("slide10", auger);
+  setOutput("sHearth", hearth, tr("dash_hearth"));
+  $("sHearthRibs").classList.toggle("roll10", hearth === true);
+  setOutput("sOuter", tank, tr("dash_feeder"));
+  $("sOuterPellets").classList.toggle("slide14", tank);
+  $("sHeadPellets").classList.toggle("slide14", tank);
+  $("sDropPellets").classList.toggle("fall", tank);
+  for (const id of ["sHeadPellets", "sDropPellets"]) $(id).style.visibility = tank ? "" : "hidden";
+  setOutput("sIgniter", reported("lighterWorks"), tr("dash_igniter"));
+  $("sFeedT").textContent = `${fmt(c.tempFeeder)} °C`;
+
+  // the flame shows when the flame sensor sees one; its size follows output (brightness while output is 0)
+  $("sFlame").style.visibility = optical >= FLAME_MIN ? "" : "hidden";
+  const size = 0.6 + 0.4 * Math.min(100, power || optical) / 100;
+  $("sFlameSize").setAttribute("transform", `scale(${size.toFixed(2)})`);
+  setTitle("sFlame", `${label("tempOpticalSensor")}: ${fmt(optical, 0)} %`);
+  $("sFlameTxt").textContent = `${fmt(optical, 0)} %`;
+  const one = (v) => (typeof v === "number" ? v.toFixed(1) : "–");  // the panel shows 6.0 kW, 0.6 kg/h
+  $("sPower").textContent = `${one(c.boilerPowerKW)} kW · ${fmt(power, 0)} %`;
+
+  const fuel = fuelPercent(c.fuelLevel);
+  const h = fuel == null ? 0 : 2 * Math.max(0, Math.min(100, fuel));  // the tank is 200 high
+  $("sFuel").setAttribute("y", 250 - h);
+  $("sFuel").setAttribute("height", h);
+  $("sFuel").classList.toggle("low", fuel != null && fuel < 15);
+  $("sFuelTxt").textContent = fuel == null ? "–" : `${fuel} %`;
+  setTitle("sTank", `${label("fuelLevel")}: ${fuel ?? "–"} %`);
+  $("sStream").textContent = `${one(c.fuelStream)} kg/h`;
+
+  // boiler water from blue at 20 °C to red at 85 °C
+  const t = c.tempCO;
+  const hue = t == null ? 210 : 210 * (1 - Math.max(0, Math.min(1, (t - 20) / 65)));
+  $("sWater").style.fill = `hsl(${hue.toFixed(0)} 70% 55% / .28)`;
+  $("sBoilerT").textContent = `${fmt(t)} °C`;
+  $("sBoilerSet").textContent = tr("dash_target", { value: fmt(c.tempCOSet) });
+  setTitle("sBoiler", `${label("tempCO")}: ${fmt(t)} °C`);
+  $("sFlue").textContent = c.tempFlueGas == null ? label("none") : `${fmt(c.tempFlueGas)} °C`;
+
+  for (const [id, key, name] of [["sPumpCO", "pumpCOWorks", tr("dash_ch_pump")],
+                                 ["sPumpCWU", "pumpCWUWorks", tr("dash_dhw_pump")]]) {
+    setOutput(id, reported(key), name);
+    $(id).querySelector(".impeller").classList.toggle("spin", c[key] === true);
+    $(id + "Txt").textContent = name;
+  }
+}
+
+function paramTable(keys, editable) {
+  if (!keys.length) return `<p class="muted">${esc(tr("dash_no_match"))}</p>`;
+  const rows = keys.map((k) => {
+    const p = params[k], unit = UNITS[p.unit] || "", can = editable && p.edit;
+    return `<tr>
+      <td>${esc(tr(k))}<div class="key">${esc(k)}</div></td>
+      <td class="nowrap"><b>${fmt(p.value)}</b> ${unit}</td>
+      <td class="nowrap muted">${fmt(p.minv)} – ${fmt(p.maxv)} ${unit}</td>
+      <td><input type="number" step="any" data-key="${esc(k)}" placeholder="${fmt(p.value)}" ${can ? "" : "disabled"}></td>
+      <td><button data-save="${esc(k)}" ${can ? "" : "disabled"}>${esc(label("save"))}</button></td>
+    </tr>`;
+  }).join("");
+  return `<table><thead><tr><th>${esc(label("parameter"))}</th><th>${esc(tr("dash_value"))}</th>` +
+    `<th>${esc(label("range"))}</th><th>${esc(tr("dash_new_value"))}</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderParams() {
+  const q = filterText.trim().toLowerCase();
+  const keys = Object.keys(params).sort().filter((k) =>
+    !q || k.toLowerCase().includes(q) || tr(k).toLowerCase().includes(q));
+
+  $("userParams").innerHTML = paramTable(keys.filter((k) => !isService(params[k])), true);
+
+  const groups = {};
+  for (const k of keys.filter((k) => isService(params[k]))) (groups[params[k].sec] ||= []).push(k);
+  $("serviceParams").innerHTML = Object.keys(groups).sort((a, b) => a - b).map((sec) =>
+    `<h3>${esc(GROUP_KEYS[sec] ? label(GROUP_KEYS[sec]) : tr("dash_section", { sec }))}</h3>` +
+    `<div class="tablewrap">${paramTable(groups[sec], unlocked)}</div>`
+  ).join("") || `<p class="muted">${esc(tr("dash_no_match"))}</p>`;
+
+  const set = params[SETPOINT];
+  if (set) {
+    $("setpoint").min = set.minv; $("setpoint").max = set.maxv;
+    if (document.activeElement !== $("setpoint")) $("setpoint").value = set.value;
+    $("setpointRange").textContent = `${set.minv}–${set.maxv} °C`;
+    // schedule rows drawn before the parameters arrived get the range now
+    for (const i of document.querySelectorAll('#schedRows [data-f="value"]')) { i.min = set.minv; i.max = set.maxv; }
+    for (const r of document.querySelectorAll("#schedRows [data-range]")) r.textContent = `${set.minv}–${set.maxv}`;
+  }
+}
+
+function renderLock() {
+  $("lockState").textContent = tr(unlocked ? "dash_unlocked" : "dash_locked");
+  $("lockState").className = "lockstate" + (unlocked ? " open" : "");
+  $("servicePw").hidden = unlocked;
+  $("btnUnlock").hidden = unlocked;
+  $("btnLock").hidden = !unlocked;
+}
+
+// The service password hash is fetched on the first unlock and kept for the life of the page.
+let serviceHash = null;
+async function getServiceHash() {
+  if (!serviceHash) {
+    const h = ((await api("/econet/password")).password || "").toLowerCase();
+    if (/^[0-9a-f]{128}$/.test(h)) serviceHash = h;  // not cached until the module has read it
+  }
+  return serviceHash;
+}
+
+async function unlock() {
+  const pw = $("servicePw").value;
+  if (!pw) { toast(tr("dash_enter_pw")); return; }
+  try {
+    const stored = await getServiceHash();
+    if (!stored) {
+      toast(tr("dash_pw_not_read"), 6000);
+      return;
+    }
+    if (sha512Hex(pw) !== stored) { toast(tr("wrong_password")); return; }
+    unlocked = true;
+    $("servicePw").value = "";
+    toast(tr("dash_unlocked_toast"));
+  } catch (e) {
+    toast(tr("dash_unlock_failed", { err: e.message }), 6000);
+  }
+  renderLock(); renderParams();
+}
+
+function lock() {
+  unlocked = false;
+  renderLock(); renderParams();
+}
+
+let liveBusy = false;
+async function refreshLive() {
+  if (liveBusy) return;  // the output log reads every second; never stack reads on a slow module
+  liveBusy = true;
+  try {
+    const curr = (await api("/econet/regParams")).curr;
+    // The module sometimes answers with an empty "curr"; keep showing the last values.
+    if (!curr || !Object.keys(curr).length) return;
+    const before = live.mode;
+    live = curr;
+    recordWatch(curr);
+    checkRefill(fuelPercent(curr.fuelLevel));
+    renderLive();
+    if (live.mode === ALARM_MODE && before !== ALARM_MODE) refreshSys();  // fetch the new alarm entry now
+    banner("");
+    lastUpdate = new Date();
+    renderUpdated();
+  } catch (e) {
+    banner(tr("dash_cannot_read", { err: e.message }));
+  } finally {
+    liveBusy = false;
+  }
+}
+
+async function refreshParams() {
+  try { params = (await api("/econet/editParams")).data || {}; renderParams(); renderLive(); }
+  catch (e) { banner(tr("dash_cannot_read_params", { err: e.message })); }
+}
+
+async function refreshSys() {
+  try {
+    sys = await api("/econet/sysParams");
+    $("title").textContent = `Burner · ${sys.controllerID || "ecoNET"}`;
+    renderSys();
+  } catch (e) { /* not critical */ }
+}
+
+const alarmName = (code) => ALARM_NAMES[lang]?.[code] ?? ALARM_NAMES.en[code] ?? tr("dash_alarm_code", { code });
+const isActive = (a) => !a.toDate;  // an alarm still in progress has no end time
+const parseTime = (s) => (s ? new Date(s.replace(" ", "T")) : null);
+
+function duration(from, to) {
+  if (!from || !to) return "";
+  const s = Math.max(0, Math.round((to - from) / 1000));
+  if (s >= 3600) return `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
+  return s >= 60 ? `${Math.round(s / 60)} min` : `${s} s`;
+}
+
+// Wi-Fi counts as unconfigured when it is connected but no network name or encryption was set:
+// the module then joins any open network in range (README.md, "Wi-Fi").
+function wifiJoinedOpenNetwork() {
+  const up = sys.wifi === true && sys.wlan0 && sys.wlan0 !== "0.0.0.0";
+  return up && (!sys.ssid || !sys.encryption || sys.encryption === "none");
+}
+
+function renderSys() {
+  if (!sys.softVer) return;  // module info not loaded yet
+  const alarms = sys.alarms || [];
+  const shown = alarms.slice(0, 10);
+  $("alarms").innerHTML = !alarms.length ? `<p class="muted">${esc(tr("dash_no_alarms"))}</p>` :
+    `<table><thead><tr><th>${esc(label("alarm"))}</th><th>${esc(label("from"))}</th><th>${esc(label("to"))}</th>` +
+    `<th>${esc(tr("dash_duration"))}</th></tr></thead><tbody>${
+      shown.map((a) => `<tr class="${isActive(a) ? "active" : ""}">
+        <td>${esc(alarmName(Number(a.code)))}<div class="key">${esc(tr("dash_code", { code: a.code }))}</div></td>
+        <td class="nowrap">${esc(a.fromDate || "–")}</td>
+        <td class="nowrap">${isActive(a) ? esc(tr("dash_ongoing")) : esc(a.toDate)}</td>
+        <td class="nowrap">${duration(parseTime(a.fromDate), parseTime(a.toDate))}</td>
+      </tr>`).join("")
+    }</tbody></table>
+    <p class="muted">${esc(tr("dash_alarm_note", { shown: shown.length, total: alarms.length }))}</p>`;
+
+  const wifiUp = sys.wifi === true && sys.wlan0 && sys.wlan0 !== "0.0.0.0";
+  const wifiText = !wifiUp ? label("disconnected")
+    : wifiJoinedOpenNetwork() ? tr("dash_open_wifi", { ip: sys.wlan0 }) : `${sys.wlan0} (${sys.ssid})`;
+  $("module").innerHTML = [
+    tile("Ethernet", esc(sys.lan ? sys.eth0 || label("connected") : label("disconnected"))),
+    tile("Wi-Fi", esc(wifiText)),
+    tile("econet24", esc(label(sys.mainSrv ? "connected" : "disconnected"))),
+    tile(label("software_version"), `${esc(sys.softVer || "–")} <span class="muted">${esc(sys.protocolType || "")}</span>`),
+    tile(label("controller"), `${esc(sys.controllerID || "–")}<div class="muted">` +
+      `${esc(label("module_version", { module: "A" }))} ${esc(sys.moduleASoftVer || "–")} · ` +
+      `${esc(label("panel"))} ${esc(sys.modulePanelSoftVer || "–")}</div>`),
+  ].join("");
+  renderWarnings();
+}
+
+function renderWarnings() {
+  const out = [];
+  const active = (sys.alarms || []).filter(isActive);
+  for (const a of active) out.push(["bad", tr("dash_warn_alarm", { from: a.fromDate, name: alarmName(Number(a.code)) })]);
+  if (live.mode === ALARM_MODE && !active.length) out.push(["bad", tr("dash_warn_alarm_state")]);
+  if (wifiJoinedOpenNetwork()) out.push(["", tr("dash_warn_wifi", { ip: sys.wlan0 })]);
+  if (sys.mainSrv === true) out.push(["", tr("dash_warn_cloud")]);
+  $("warnings").innerHTML = out.map(([cls, msg]) => `<div class="${cls}">${esc(msg)}</div>`).join("");
+}
+
+// The module only range-checks normal parameters and accepts any BOILER_CONTROL value,
+// so every write is validated here first.
+function validate(name, value) {
+  if (!Number.isFinite(value)) return tr("dash_enter_number");
+  if (name === "BOILER_CONTROL") return value === 0 || value === 1 ? null : tr("dash_must_01");
+  const p = params[name];
+  if (!p) return tr("dash_unknown_param", { name });
+  if (!p.edit) return tr("dash_read_only", { name });
+  if (isService(p) && !unlocked) return tr("dash_unlock_first");
+  if (value < p.minv || value > p.maxv) return tr("dash_allowed_range", { min: p.minv, max: p.maxv });
+  return null;
+}
+
+async function write(name, value, question) {
+  const err = validate(name, value);
+  if (err) { toast(err); return; }
+  if (!confirm(question)) return;
+  try {
+    const q = new URLSearchParams({ newParamName: name, newParamValue: String(value) });
+    const res = await api("/econet/newParam?" + q);
+    if (res.result !== "OK") throw new Error(JSON.stringify(res));
+    toast(tr("dash_sent", { name, value }));
+    setTimeout(async () => {
+      await refreshParams(); await refreshLive();
+      if (name !== "BOILER_CONTROL" && params[name]) {
+        const now = params[name].value;
+        toast(tr(now == value ? "dash_now" : "dash_still", { name, value: now }), 6000);
+      }
+    }, 4000);
+  } catch (e) {
+    toast(tr("dash_write_failed", { err: e.message }), 6000);
+  }
+}
+
+// Schedule tab. The module's econet-sched service stores the entries and turns them into cron
+// jobs that run econet-set, so they run without this page. Days use cron numbers (0 = Sunday).
+const SCHED_ACTIONS = { on: "dash_turn_on", off: "dash_turn_off", off_after: "dash_off_after", target: SETPOINT };
+const WEEK = [1, 2, 3, 4, 5, 6, 0];  // shown Monday first
+// "Turn off after cycle" waits for supervision/stopped/burning off, at most this long (minutes).
+const OFF_AFTER_WAIT = 90, WAIT_MIN = 5, WAIT_MAX = 240;
+let sched = null;      // last answer of /schedule/get
+let schedError = null; // why the service couldn't be reached
+let schedRows = [];    // the entries as edited on this page
+let schedDirty = false;
+
+// 1–7 January 2024 ran Monday to Sunday.
+const dayName = (d) => new Intl.DateTimeFormat(lang, { weekday: "short" }).format(new Date(2024, 0, d || 7));
+
+function applySched(s, replaceRows) {
+  sched = s; schedError = null;
+  offPending = s.pending ?? null; offAfterAvailable = true; renderPending();
+  if (replaceRows || !schedDirty) {
+    schedRows = s.entries.map((e) => ({ ...e, days: [...e.days] }));
+    schedDirty = false;
+    renderSchedRows();
+  }
+  renderSchedStatus();
+}
+
+async function refreshSched() {
+  try { applySched(await api("/schedule/get")); }
+  catch (e) { schedError = e.message; renderSchedStatus(); }
+}
+
+function renderSchedRows() {
+  if (!sched && !schedError) return;
+  const set = params[SETPOINT];  // the target's allowed range comes from the controller
+  const options = (sel) => Object.entries(SCHED_ACTIONS).map(([v, key]) =>
+    `<option value="${v}" ${v === sel ? "selected" : ""}>${esc(label(key))}</option>`).join("");
+  $("schedRows").innerHTML = !schedRows.length ? `<p class="muted">${esc(tr("dash_sched_empty"))}</p>` :
+    `<table class="sched"><thead><tr><th>${esc(heading("active"))}</th><th>${esc(heading("time"))}</th>` +
+    `<th>${esc(heading("days"))}</th><th>${esc(tr("dash_sched_action"))}</th><th></th></tr></thead><tbody>${
+      schedRows.map((e, i) => `<tr data-row="${i}" class="${e.on ? "" : "ruleoff"}">
+        <td><input type="checkbox" data-f="on" ${e.on ? "checked" : ""}
+          title="${esc(tr(e.id ? "dash_rule_hint" : "dash_rule_hint_new"))}"></td>
+        <td><input type="time" data-f="time" value="${esc(e.time)}"></td>
+        <td class="nowrap">${WEEK.map((d) =>
+          `<button class="day ${e.days.includes(d) ? "on" : ""}" data-day="${d}">${esc(dayName(d))}</button>`).join("")}</td>
+        <td><select data-f="action">${options(e.action)}</select>
+          <span data-valuebox ${e.action === "target" ? "" : "hidden"}>
+            <input type="number" data-f="value" step="1" min="${set?.minv ?? ""}" max="${set?.maxv ?? ""}"
+              value="${e.value ?? ""}"> °C <span class="muted" data-range>${set ? `${set.minv}–${set.maxv}` : ""}</span></span>
+          <span data-waitbox ${e.action === "off_after" ? "" : "hidden"}>${esc(tr("dash_sched_wait"))}
+            <input type="number" data-f="wait" step="5" min="${WAIT_MIN}" max="${WAIT_MAX}" value="${e.wait ?? OFF_AFTER_WAIT}"> min</span></td>
+        <td><button data-del title="${esc(label("delete"))}">✕</button></td>
+      </tr>`).join("")
+    }</tbody></table>`;
+  renderSchedDirty();
+}
+
+function renderSchedStatus() {
+  const warn = [];
+  if (schedError) warn.push(["bad", tr("dash_sched_missing", { err: schedError })]);
+  if (sched && !sched.clockOk) warn.push(["bad", tr("dash_sched_clock_bad", { time: sched.now })]);
+  const off = sched?.enabled === false;  // the whole schedule switched off, entries kept
+  if (off) warn.push(["", tr("dash_sched_off_warn")]);
+  else if (sched && !sched.cron && sched.entries.some((e) => e.on)) warn.push(["", tr("dash_sched_cron_off")]);
+  $("schedEnabled").disabled = !sched;
+  $("schedEnabled").checked = !!sched && !off;
+  $("schedRows").classList.toggle("schedoff", off);
+  $("schedWarn").innerHTML = warn.map(([cls, msg]) => `<div class="${cls}">${esc(msg)}</div>`).join("");
+  $("schedClock").textContent = sched ? tr("dash_sched_clock", { time: `${sched.now} ${sched.tz}` }) : "";
+  const runs = sched?.runs || [];
+  $("schedRuns").innerHTML = !runs.length ? `<p class="muted">${esc(tr("dash_sched_no_runs"))}</p>` :
+    `<table><tbody>${runs.map((r) => `<tr class="${/FAILED|refused|not sent/.test(r.msg) ? "active" : ""}">
+      <td class="nowrap">${esc(r.time)}</td><td>${esc(r.msg)}</td></tr>`).join("")}</tbody></table>`;
+  renderSchedDirty();
+}
+
+function renderSchedDirty() {
+  $("schedDirty").hidden = !schedDirty;
+  $("schedSave").disabled = !schedDirty || !sched;
+}
+
+function schedRowError(e) {
+  if (!/^\d\d:\d\d$/.test(e.time || "")) return tr("dash_sched_bad_time");
+  if (!e.days.length) return tr("dash_sched_pick_day");
+  if (e.action === "off_after" && !(Number.isInteger(e.wait) && e.wait >= WAIT_MIN && e.wait <= WAIT_MAX))
+    return tr("dash_allowed_range", { min: WAIT_MIN, max: WAIT_MAX });
+  return e.action === "target" ? validate(SETPOINT, e.value) : null;
+}
+
+// POST as JSON: the schedule service only takes JSON (keeps other sites from posting with the saved login).
+async function postJSON(path, body) {
+  const r = await fetch(url(path), {
+    method: "POST", cache: "no-store", credentials: "same-origin",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  const res = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(res.error || `HTTP ${r.status}`);
+  return res;
+}
+
+async function saveSched() {
+  for (const [i, e] of schedRows.entries()) {
+    const err = schedRowError(e);
+    if (err) { toast(tr("dash_sched_row", { row: i + 1, err }), 6000); return; }
+  }
+  try {
+    applySched(await postJSON("/schedule/set", { entries: schedRows }), true);
+    toast(tr("dash_sched_saved"));
+  } catch (e) {
+    toast(tr("dash_write_failed", { err: e.message }), 6000);
+  }
+}
+
+function schedEdit(ev) {
+  const row = ev.target.closest("[data-row]"), f = ev.target.dataset.f;
+  if (!row || !f) return;
+  const e = schedRows[row.dataset.row];
+  if (f === "on") {
+    if (ev.type !== "change") return;  // checkboxes fire input and change; act once
+    e.on = ev.target.checked;
+    row.classList.toggle("ruleoff", !e.on);
+    if (e.id) { toggleEntry(e, ev.target); return; }  // a saved rule switches at once, not on Save
+    schedDirty = true; renderSchedDirty();
+    return;
+  }
+  if (f === "value") {
+    e.value = ev.target.value === "" ? null : Number(ev.target.value);
+    // keep the target inside the controller's range once the field is left (typing stays free)
+    const set = params[SETPOINT];
+    if (ev.type === "change" && e.value != null && Number.isFinite(e.value) && set) {
+      e.value = Math.min(set.maxv, Math.max(set.minv, Math.round(e.value)));
+      ev.target.value = e.value;
+    }
+  }
+  else if (f === "wait") {
+    e.wait = ev.target.value === "" ? null : Number(ev.target.value);
+    if (ev.type === "change" && e.wait != null && Number.isFinite(e.wait)) {
+      e.wait = Math.min(WAIT_MAX, Math.max(WAIT_MIN, Math.round(e.wait)));
+      ev.target.value = e.wait;
+    }
+  }
+  else e[f] = ev.target.value;
+  if (f === "action") {
+    row.querySelector("[data-valuebox]").hidden = e.action !== "target";
+    row.querySelector("[data-waitbox]").hidden = e.action !== "off_after";
+    if (e.action === "target" && e.value == null) {
+      e.value = params[SETPOINT]?.value ?? null;
+      row.querySelector('[data-f="value"]').value = e.value ?? "";
+    }
+    if (e.action === "off_after" && e.wait == null) e.wait = OFF_AFTER_WAIT;
+  }
+  schedDirty = true; renderSchedDirty();
+}
+
+const schedPanel = document.querySelector('[data-panel="schedule"]');
+schedPanel.addEventListener("input", schedEdit);
+schedPanel.addEventListener("change", schedEdit);
+schedPanel.addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button"), row = btn?.closest("[data-row]");
+  if (!row) return;
+  if (btn.dataset.day !== undefined) {
+    const days = schedRows[row.dataset.row].days, d = Number(btn.dataset.day), i = days.indexOf(d);
+    if (i < 0) days.push(d); else days.splice(i, 1);
+    btn.classList.toggle("on", i < 0);
+  } else if (btn.dataset.del !== undefined) {
+    schedRows.splice(Number(row.dataset.row), 1);
+    renderSchedRows();
+  }
+  schedDirty = true; renderSchedDirty();
+});
+$("schedAdd").onclick = () => {
+  schedRows.push({ on: true, time: "06:00", days: [1, 2, 3, 4, 5], action: "on" });
+  schedDirty = true; renderSchedRows();
+};
+$("schedSave").onclick = saveSched;
+
+// One saved rule on or off, applied at once; other unsaved edits in the table stay as they are.
+async function toggleEntry(e, box) {
+  box.disabled = true;
+  try {
+    applySched(await postJSON("/schedule/entry", { id: e.id, on: e.on }));
+    toast(tr(e.on ? "dash_rule_on" : "dash_rule_off", { time: e.time }));
+  } catch (err) {
+    e.on = !e.on;
+    box.checked = e.on;
+    box.closest("tr").classList.toggle("ruleoff", !e.on);
+    toast(tr("dash_write_failed", { err: err.message }), 6000);
+  } finally {
+    box.disabled = false;
+  }
+}
+// Switching the whole schedule on or off applies at once and leaves unsaved row edits alone.
+$("schedEnabled").onchange = async (ev) => {
+  const on = ev.target.checked;
+  ev.target.disabled = true;
+  try {
+    applySched(await postJSON("/schedule/enable", { enabled: on }));
+    toast(tr(on ? "dash_sched_now_on" : "dash_sched_now_off"));
+  } catch (e) {
+    toast(tr("dash_write_failed", { err: e.message }), 6000);
+    renderSchedStatus();  // back to the module's state
+  }
+};
+
+// "Turn off after cycle": the schedule service starts econet-set, which waits on the module, so the
+// page can be closed. The wait is checked once on load and every minute while one is running.
+let offPending = null, offAfterAvailable = false;
+
+async function refreshPending() {
+  try { offPending = (await api("/schedule/pending")).pending; offAfterAvailable = true; }
+  catch (e) { offPending = null; offAfterAvailable = false; }  // no schedule service on the module
+  renderPending();
+}
+
+function renderPending() {
+  $("btnOffAfter").hidden = !offAfterAvailable;
+  $("btnOffAfter").disabled = !!offPending || live.mode === undefined || live.mode === 0;
+  $("offPending").hidden = !offPending;
+  if (offPending) $("offPendingTxt").textContent = tr("dash_off_pending", { since: offPending.since, until: offPending.until });
+}
+
+$("btnOffAfter").onclick = async () => {
+  if (!confirm(tr("dash_confirm_off_after", { min: OFF_AFTER_WAIT }))) return;
+  try {
+    offPending = (await postJSON("/schedule/offafter", { wait: OFF_AFTER_WAIT })).pending;
+    renderPending();
+    toast(tr("dash_off_after_started", { min: OFF_AFTER_WAIT }));
+  } catch (e) {
+    toast(tr("dash_write_failed", { err: e.message }), 6000);
+  }
+};
+$("btnOffCancel").onclick = async () => {
+  try {
+    await postJSON("/schedule/cancel", {});
+    offPending = null; renderPending();
+    toast(tr("dash_off_cancelled"));
+  } catch (e) {
+    toast(tr("dash_write_failed", { err: e.message }), 6000);
+  }
+};
+
+// ---- Hopper refill. The controller calculates the fuel level from the feeder's run time, so it only
+// rises when it's set on the panel after filling the hopper. Then the page asks how many bags went in
+// and logs them through the n8n webhook of refills.html (docs/refill-log.md). The webhook
+// URL, token and bag weight use that page's browser storage keys, so both pages share them when served
+// from the same address. The last level seen is kept in the browser, so a rise while the page was
+// closed is asked about on the next visit.
+const REFILL_RISE = 5;                 // percentage points
+const REFILL_MARGIN = 30 * 60 * 1000;  // an entry up to this long before the rise counts as its refill
+const KG_PER_BAG = 15, DAY = 24 * 3600 * 1000;
+const BAG_FORMS = {  // by Intl.PluralRules category
+  en: { one: "bag", other: "bags" },
+  sl: { one: "vreča", two: "vreči", few: "vreče", other: "vreč" },
+  pl: { one: "worek", few: "worki", many: "worków", other: "worka" },
+};
+const store = {
+  get(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* storage may be blocked */ } },
+  del(k) { try { localStorage.removeItem(k); } catch (e) { /* storage may be blocked */ } },
+  json(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
+};
+const zkMem = {};  // settings entered on this page, for when storage is blocked
+const zk = () => ({ url: zkMem.url ?? store.get("refillUrl"), token: zkMem.token ?? store.get("refillToken") });
+const kgPerBag = () => { const v = Number(zkMem.kg ?? store.get("refillKg")); return v > 0 ? v : KG_PER_BAG; };
+let fuelSeen = store.json("dashFuelSeen");     // {pct, t}: the last fuel level this browser saw
+let refillPending = store.json("dashRefill");  // {from, to, since, at}: a rise nobody has answered yet
+let fuelHighAt = null;                         // when a rise was first read; it's asked on the next reading
+let refillRise = null, refillDupeOk = false, refillTimeTouched = false;
+
+const pad2 = (n) => String(n).padStart(2, "0");
+const localInput = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+const kgFmt = (v) => new Intl.NumberFormat(lang, { maximumFractionDigits: 1 }).format(v);
+function bagsText(n) {
+  const forms = BAG_FORMS[lang] || BAG_FORMS.en;
+  return `${n} ${forms[new Intl.PluralRules(lang).select(n)] ?? forms.other}`;
+}
+function when(t) {  // time only for today, else with the date
+  const d = new Date(t);
+  const today = d.toDateString() === new Date().toDateString();
+  return d.toLocaleString(lang, today ? { hour: "numeric", minute: "2-digit" }
+    : { day: "numeric", month: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+// Called with every reading of the fuel level (%).
+function checkRefill(pct) {
+  if (pct == null) return;
+  const now = Date.now();
+  const stored = store.json("dashFuelSeen");  // another tab may have seen a newer level
+  const seen = Number.isFinite(stored?.pct) ? stored : fuelSeen;
+  if (seen && pct >= seen.pct + REFILL_RISE) {
+    if (fuelHighAt == null) { fuelHighAt = now; return; }  // one odd reading doesn't ask
+    askRefill({ from: seen.pct, to: pct, since: seen.t, at: fuelHighAt });
+  }
+  fuelHighAt = null;
+  fuelSeen = { pct, t: now };
+  store.set("dashFuelSeen", JSON.stringify(fuelSeen));
+}
+
+async function zkCall(method, query, body) {
+  const { url: hook, token } = zk();
+  if (!hook || !token) throw new Error(tr("dash_refill_need_cfg"));
+  const u = new URL(hook);
+  for (const [k, v] of Object.entries(query || {})) u.searchParams.set(k, v);
+  let r;
+  try {
+    r = await fetch(u, {
+      method, cache: "no-store",  // credentials stay "same-origin": the module's login never goes to n8n
+      headers: body ? { "X-Token": token, "Content-Type": "application/json" } : { "X-Token": token },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    throw new Error(tr("dash_refill_unreachable", { url: u.origin + u.pathname }));
+  }
+  const data = await r.json().catch(() => null);
+  if (r.status === 401 || r.status === 403) throw new Error(tr("dash_refill_bad_token"));
+  if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}${data?.message ? `: ${data.message}` : ""}`);
+  return data;
+}
+
+// The newest refill logged at or after time t (on another device, or in refills.html), or null.
+async function loggedSince(t) {
+  const start = new Date(t); start.setHours(0, 0, 0, 0);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = Math.min(400, Math.max(1, Math.round((today - start) / DAY) + 1));
+  const data = await zkCall("GET", { days });
+  return (Array.isArray(data?.items) ? data.items : []).find((it) => new Date(it.time) >= t) ?? null;
+}
+
+function markRefill() {
+  $("btnRefill").classList.toggle("due", !!refillPending);
+  $("btnRefill").title = refillPending ? tr("dash_refill_rose", { from: refillPending.from, to: refillPending.to, time: when(refillPending.at) }) : "";
+}
+
+function endRefill() {
+  refillPending = refillRise = null;
+  store.del("dashRefill");
+  markRefill();
+}
+
+async function askRefill(rise) {
+  // a second rise before the first was answered: one question, from the first level up to now
+  refillPending = refillPending ? { ...refillPending, to: rise.to } : rise;
+  store.set("dashRefill", JSON.stringify(refillPending));
+  markRefill();
+  if ($("refill").open) return;
+  if (zk().url && zk().token) {
+    try {
+      const done = await loggedSince(refillPending.since - REFILL_MARGIN);
+      if (done) {
+        endRefill();
+        toast(tr("dash_refill_done", { time: when(done.time), bags: bagsText(Number(done.bags)) }), 8000);
+        return;
+      }
+    } catch (e) { /* ask anyway; saving checks again and shows the error */ }
+  }
+  if (refillPending && !$("refill").open) openRefill(refillPending);
+}
+
+function openRefill(rise) {  // rise is null when opened with the button and no rise is waiting
+  refillRise = rise; refillDupeOk = false; refillTimeTouched = false;
+  $("refillTime").value = localInput(new Date(rise ? rise.at : Date.now()));
+  $("refillBags").value = 1;
+  const { url: hook, token } = zk();
+  $("refillUrl").value = hook;
+  $("refillToken").value = token;
+  $("refillKgPer").value = kgPerBag();
+  $("refillCfg").open = !hook || !token;
+  $("refillMsg").textContent = "";
+  renderRefill();
+  if (!$("refill").open) $("refill").showModal();
+  $("refillBags").focus();
+  $("refillBags").select();
+}
+
+function renderRefill() {
+  const r = refillRise;
+  $("refillWhy").hidden = !r;
+  if (r) $("refillWhy").textContent = tr(r.at - r.since > 10 * 60 * 1000 ? "dash_refill_rose_between" : "dash_refill_rose",
+    { from: r.from, to: r.to, since: when(r.since), time: when(r.at) });
+  const n = Number($("refillBags").value), per = Number($("refillKgPer").value);
+  $("refillKg").textContent = Number.isInteger(n) && n > 0 ? `= ${kgFmt(n * (per > 0 ? per : kgPerBag()))} kg` : "";
+  $("refillSkip").textContent = tr(r ? "dash_refill_skip" : "cancel");
+  $("refillSkip").title = r ? tr("dash_refill_skip_hint") : "";
+  $("refillSave").textContent = tr(refillDupeOk ? "dash_refill_save_anyway" : "save");
+}
+
+$("refillForm").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const fail = (msg, cfg) => { $("refillMsg").textContent = msg; if (cfg) $("refillCfg").open = true; };
+  const hook = $("refillUrl").value.trim(), token = $("refillToken").value.trim(), kg = Number($("refillKgPer").value);
+  if (!hook || !token) return fail(tr("dash_refill_need_cfg"), true);
+  try { new URL(hook); } catch (e) { return fail(tr("dash_refill_bad_url"), true); }
+  if (!(kg >= 0.5 && kg <= 100)) return fail(tr("dash_refill_bad_kg"), true);
+  Object.assign(zkMem, { url: hook, token, kg });
+  store.set("refillUrl", hook);
+  store.set("refillToken", token);
+  store.set("refillKg", String(kg));
+  const n = Number($("refillBags").value);
+  if (!Number.isInteger(n) || n < 1 || n > 100) return fail(tr("dash_refill_bad_bags"));
+  // as in refills.html: an untouched time is the moment of the rise, or of the click when opened by hand
+  const t = refillTimeTouched ? new Date($("refillTime").value) : new Date(refillRise ? refillRise.at : Date.now());
+  if (isNaN(t)) return fail(tr("dash_refill_bad_time"));
+  $("refillMsg").textContent = "";
+  $("refillSave").disabled = true;
+  try {
+    if (refillRise && !refillDupeOk) {  // logged meanwhile on another device or in refills.html?
+      const done = await loggedSince(refillRise.since - REFILL_MARGIN);
+      if (done) {
+        refillDupeOk = true;
+        renderRefill();
+        return fail(tr("dash_refill_dupe", { time: when(done.time), bags: bagsText(Number(done.bags)) }));
+      }
+    }
+    const saved = await zkCall("POST", null, { time: t.toISOString(), bags: n });
+    const b = Number(saved?.bags ?? n);
+    endRefill();
+    $("refill").close();
+    toast(tr("dash_refill_saved", { time: when(saved?.time ?? t), bags: bagsText(b), kg: kgFmt(b * kg) }), 6000);
+  } catch (e) {
+    fail(e.message);
+  } finally {
+    $("refillSave").disabled = false;
+  }
+};
+$("refillSkip").onclick = () => { if (refillRise) endRefill(); $("refill").close(); };
+$("refillBags").oninput = $("refillKgPer").oninput = renderRefill;
+$("refillTime").oninput = () => { refillTimeTouched = true; };
+$("btnRefill").onclick = () => openRefill(refillPending);
+// Esc closes the dialog without answering: the rise stays waiting, on the button and on the next visit.
+
+$("btnOn").onclick = () => write("BOILER_CONTROL", 1, tr("boiler_control_on"));
+$("btnOff").onclick = () => write("BOILER_CONTROL", 0, tr("boiler_control_off"));
+$("btnSet").onclick = () => {
+  const v = Number($("setpoint").value);
+  write(SETPOINT, v, tr("dash_confirm_set", { value: v }));
+};
+$("btnUnlock").onclick = unlock;
+$("servicePw").onkeydown = (ev) => { if (ev.key === "Enter") unlock(); };
+$("btnLock").onclick = lock;
+for (const f of document.querySelectorAll(".filter")) {
+  f.oninput = () => {
+    filterText = f.value;
+    for (const other of document.querySelectorAll(".filter")) if (other !== f) other.value = filterText;
+    renderParams();
+  };
+}
+$("tabs").onclick = (ev) => { if (ev.target.dataset.tab) showTab(ev.target.dataset.tab); };
+$("watchFilters").onchange = (ev) => {
+  const k = ev.target.dataset.wf;
+  if (!k) return;
+  const sel = new Set(watchSel);
+  if (ev.target.checked) sel.add(k); else sel.delete(k);
+  setWatchSel(sel);
+};
+$("watchAll").onclick = () => setWatchSel(new Set(WATCH_CHIPS.concat(WATCH_BITS.map((b) => b.id))));
+$("watchNone").onclick = () => setWatchSel(new Set());
+$("watchClear").onclick = () => { watchLog = []; watchPrev = null; watchChips = ""; renderWatch(); };
+$("watchSave").onclick = saveWatch;
+$("langs").onclick = (ev) => { if (ev.target.dataset.lang) setLang(ev.target.dataset.lang); };
+document.querySelector("main").addEventListener("click", (ev) => {
+  const key = ev.target.dataset.save;
+  if (!key) return;
+  const input = document.querySelector(`input[data-key="${key}"]`);
+  const v = Number(input.value);
+  write(key, v, tr("dash_confirm_change", { label: tr(key), old: params[key].value, new: v }));
+});
+
+(async () => {
+  buildScene();
+  let tab = null;
+  try { tab = localStorage.getItem("dashTab"); } catch (e) { /* storage may be blocked */ }
+  showTab(new URLSearchParams(location.search).get("tab") || tab);
+  await loadLang("en");  // fallback for keys missing in the chosen language
+  await setLang(initialLang());
+  await Promise.all([refreshSys(), refreshParams()]);
+  await refreshLive();
+  refreshPending();
+  if (refillPending) askRefill(refillPending);  // a rise left unanswered on an earlier visit
+  setInterval(refreshLive, LIVE_MS);
+  setInterval(() => { if (offPending) refreshPending(); }, SYS_MS);
+  setInterval(refreshParams, PARAMS_MS);
+  setInterval(refreshSys, SYS_MS);
+  setInterval(() => { if (tabOpen("schedule")) refreshSched(); }, SYS_MS);
+  // the output log reads every second while its tab is open and the page is visible
+  setInterval(() => { if (tabOpen("watch") && !document.hidden) refreshLive(); }, WATCH_MS);
+})();
+</script>
+</body>
+</html>

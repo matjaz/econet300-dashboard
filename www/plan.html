@@ -1,0 +1,721 @@
+<!doctype html>
+<!--
+  Week overview of the burner schedule that the ecoNET300 module runs (module/econet-sched):
+  when the burner is planned on or off and at which boiler target, today and the next 6 days.
+  Served next to dash.html:  /www/econet/client/plan.html  ->  http://<module>/plan.html
+  Read-only: it reads /schedule/get, /econet/regParams and /econet/editParams with the
+  browser's ecoNET login and changes nothing. Its name must not start with "schedule":
+  lighttpd hands every path that starts with /schedule to the schedule service.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Burner schedule</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #fff; --text: #1d2228; --muted: #6b7480; --line: #e3e6ea;
+    --off: #8a939e; --start: #c98a12; --run: #1f9d55; --stop: #3a7bd5; --alarm: #d64545;
+    --target: #2a78d6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14171b; --card: #1d2127; --text: #e6e9ed; --muted: #9aa3ad; --line: #2c3239;
+            --target: #3987e5; color-scheme: dark; }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+  .headright { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  a { color: inherit; }
+  .langs { display: flex; gap: 4px; }
+  button { font: inherit; padding: 4px 9px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--card); color: var(--text); cursor: pointer; }
+  .langs button { font-size: 13px; }
+  .langs button.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 15px; margin: 16px 0 6px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  h2:first-child { margin-top: 0; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-top: 16px; }
+  .warnings > div { margin-top: 12px; padding: 10px 14px; border-radius: 8px; background: var(--start); color: #fff; }
+  .warnings > div.bad { background: var(--alarm); }
+  .badge { font-size: 17px; font-weight: 700; padding: 4px 12px; border-radius: 8px; color: #fff; background: var(--off); }
+  .badge.start { background: var(--start); } .badge.run { background: var(--run); }
+  .badge.stop { background: var(--stop); } .badge.alarm { background: var(--alarm); }
+  .now { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+  .now .vals { font-size: 17px; font-weight: 600; }
+  .next { list-style: none; margin: 0; padding: 0; }
+  .next li { display: grid; grid-template-columns: 8em auto 1fr; align-items: baseline; gap: 0 12px; padding: 3px 0; }
+  .next li.muted { display: block; }
+  .next .when { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  /* week: one strip per day, 00-24 */
+  .days { display: grid; gap: 2px; }
+  .hours, .dayrow { display: grid; grid-template-columns: 140px 1fr 136px; gap: 4px 12px; align-items: center; }
+  .hours { padding: 0 9px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .scale { position: relative; height: 1.3em; }
+  .scale span { position: absolute; transform: translateX(-50%); }
+  .scale span:first-child { transform: none; } .scale span:last-child { transform: translateX(-100%); }
+  .dayrow { width: 100%; text-align: left; padding: 7px 8px; border: 1px solid transparent; background: transparent; }
+  .dayrow:hover { background: var(--bg); }
+  .dayrow[aria-pressed="true"] { background: var(--bg); border-color: var(--line); }
+  .dname { font-weight: 600; white-space: nowrap; }
+  .dsum { font-size: 13px; line-height: 1.3; color: var(--muted); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .dsum span { display: block; }
+  .bar { position: relative; height: 16px; border-radius: 4px; background: var(--line); overflow: hidden; }
+  .bar i { position: absolute; top: 0; bottom: 0; }
+  .bar .on { background: var(--run); border-radius: 3px; }
+  .bar .after { background: linear-gradient(to right, var(--run), transparent); opacity: .6; }
+  .bar .unknown { border: 1px dashed var(--off); border-radius: 3px; }
+  .bar .past { left: 0; background: var(--card); opacity: .55; }
+  .bar .tick { width: 1px; background: var(--card); opacity: .8; }
+  .bar .tdot { top: 50%; bottom: auto; width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%;
+               background: var(--target); box-shadow: 0 0 0 2px var(--card); }
+  .bar .nowl { width: 2px; margin-left: -1px; background: var(--text); }
+  @media (max-width: 560px) {
+    .dayrow { grid-template-columns: 1fr auto; grid-template-areas: "name sum" "bar bar"; }
+    .dname { grid-area: name; } .dsum { grid-area: sum; } .dayrow .bar { grid-area: bar; }
+    .hours { grid-template-columns: 1fr; } .hours > span { display: none; }
+    .dsum span { display: inline; } .dsum span + span::before { content: " · "; }
+    .next li { grid-template-columns: 7.5em 1fr; } .next li > .muted { grid-column: 2; }
+  }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 12px; font-size: 13px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw { display: inline-block; width: 18px; height: 10px; border-radius: 3px; background: var(--line); }
+  .sw.on { background: var(--run); }
+  .sw.after { background: linear-gradient(to right, var(--run), transparent); opacity: .6; outline: 1px solid var(--line); }
+  .sw.past { opacity: .45; }
+  .sw.unknown { background: none; border: 1px dashed var(--off); }
+  .lk { display: inline-block; width: 18px; height: 2px; border-radius: 1px; background: var(--target); }
+  .lk.now { width: 2px; height: 14px; background: var(--text); }
+
+  /* one day */
+  .chartwrap { position: relative; margin-top: 8px; }
+  .chartwrap svg { display: block; width: 100%; height: auto; font: inherit; overflow: visible; }
+  .chartwrap .grid { stroke: var(--line); stroke-width: 1; shape-rendering: crispEdges; }
+  .chartwrap .ax { fill: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .chartwrap .tline { fill: none; stroke: var(--target); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .chartwrap .tline.faint { opacity: .3; }
+  .chartwrap .tval { fill: var(--muted); font-size: 12px; }
+  .chartwrap .flagline { stroke: var(--muted); stroke-width: 1; opacity: .45; }
+  .chartwrap .flag { fill: var(--text); font-size: 12px; }
+  .chartwrap .faded { opacity: .45; }
+  .chartwrap .m-on { fill: var(--run); } .chartwrap .m-off { fill: var(--off); }
+  .chartwrap .m-after { fill: var(--card); stroke: var(--off); stroke-width: 1.5; }
+  .chartwrap .m-target { fill: var(--target); stroke: var(--card); stroke-width: 2; }
+  .chartwrap .band { fill: var(--line); } .chartwrap .band.on { fill: var(--run); }
+  .chartwrap .band.past { fill: var(--card); opacity: .55; }
+  .chartwrap .band.unknown { fill: none; stroke: var(--off); stroke-dasharray: 3 2; }
+  .chartwrap .g0 { stop-color: var(--run); stop-opacity: .6; } .chartwrap .g1 { stop-color: var(--run); stop-opacity: 0; }
+  .chartwrap .nowline { stroke: var(--text); stroke-width: 2; }
+  .chartwrap .dot { fill: var(--text); stroke: var(--card); stroke-width: 2; }
+  .chartwrap .dotlabel { fill: var(--text); font-size: 12px; font-weight: 600; }
+  .chartwrap .cross { stroke: var(--muted); stroke-width: 1; }
+  .tip { position: absolute; top: 40px; pointer-events: none; background: var(--card); border: 1px solid var(--line);
+         border-radius: 8px; padding: 6px 10px; font-size: 13px; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+  .tip b { display: block; font-size: 16px; }
+  .tip span { display: block; color: var(--muted); }
+  .tablewrap { overflow-x: auto; margin-top: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 7px 6px; border-top: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; border-top: 0; }
+  td:first-child { width: 5em; font-variant-numeric: tabular-nums; }
+  tr.faded td { color: var(--muted); }
+  .note { margin: 16px 2px 0; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 data-i18n="plan_title">Burner schedule</h1>
+    <div class="headright">
+      <a href="dash.html?tab=schedule" data-i18n="plan_edit">Edit schedule →</a>
+      <div class="langs" id="langs">
+        <button data-lang="sl">SL</button><button data-lang="en">EN</button><button data-lang="pl">PL</button>
+      </div>
+    </div>
+  </header>
+  <div class="warnings" id="warnings"></div>
+
+  <section class="card">
+    <div class="now" id="now"><span class="muted">…</span></div>
+    <h2 data-i18n="plan_next">Next</h2>
+    <ul class="next" id="next"></ul>
+  </section>
+
+  <section class="card">
+    <div class="days" id="days"></div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <section class="card">
+    <h2 id="dayTitle"></h2>
+    <div class="chartwrap" id="chartWrap"><div class="tip" id="tip" hidden></div></div>
+    <div class="tablewrap" id="dayList"></div>
+  </section>
+
+  <p class="muted note"><span data-i18n="plan_note"></span> <span id="inactive"></span></p>
+</main>
+<script>
+// Mode numbers as ecoMAX controllers report them (see dash.html); names come from the translation files.
+const MODE_KEYS = ["modeTurnOff", "modeStop", "modeKindle", "modeWork", "modeSupervision", "modeHalt",
+  "modeCleaning", "modeExtinction", "modeAlarm", "modeManual", "modeUnsealing", "modeOther",
+  "modeStabilization", "modePurge", "modeCheckFlame", "modeFlameLosing", "modePrevention",
+  "modeWorkGrate", "modeSupervisionGrate", "modeCalibration", "modeChimneySweep", "modeOpenDoor"];
+const MODE_CLASS = { 0: "", 2: "start", 6: "start", 12: "start", 13: "start", 14: "start",
+  3: "run", 4: "run", 17: "run", 18: "run", 7: "stop", 1: "stop", 5: "stop", 8: "alarm", 15: "alarm" };
+// The burner counts as off in Off (0) and Burning off (7), as econet-set reads BOILER_CONTROL back.
+const OFF_MODES = [0, 7];
+const SETPOINT = "CO_TEMP_SET";
+const DAYS = 7, DAY = 1440;  // days shown, minutes in a day
+const SCHED_MS = 60000, LIVE_MS = 30000, PARAMS_MS = 300000, TICK_MS = 60000;
+const LANG_FILES = { en: "/translate_EN.js", sl: "/translate_SL.js", pl: "/translate_PL.js" };
+const OWN = {
+  en: {
+    plan_title: "Burner schedule", plan_edit: "Edit schedule →", plan_clock: "module time @time",
+    plan_boiler: "boiler @value °C", plan_target: "target @value °C", plan_effective: "(in effect @value °C)",
+    plan_pending: "turns off after the cycle, at the latest at @until",
+    plan_next: "Next", plan_no_next: "Nothing scheduled in the next 7 days.", plan_in: "in @t",
+    plan_today: "today", plan_tomorrow: "tomorrow",
+    plan_a_on: "Turn on", plan_a_off: "Turn off", plan_a_off_after: "Turn off after cycle (at most @wait min)",
+    plan_a_target: "Boiler target @value °C",
+    plan_f_on: "on", plan_f_off: "off", plan_f_off_after: "off after cycle", plan_f_target: "@value °C",
+    plan_s_on: "burner on", plan_s_off: "burner off", plan_s_after: "turning off after cycle",
+    plan_s_unknown: "state unknown", plan_s_past: "past",
+    plan_l_on: "On", plan_l_after: "Off after cycle (at the latest at the end)", plan_l_off: "Off",
+    plan_l_past: "Past", plan_l_unknown: "Unknown", plan_l_target: "Boiler target", plan_l_now: "Now, boiler temperature",
+    plan_rest: "@t more", plan_time: "Time", plan_action: "Action", plan_no_events: "No entries on this day.",
+    plan_chart: "Planned burner state and boiler target, @day",
+    plan_note: "Times follow the module's clock. Between entries the burner stays as it was left (panel or dashboard). The panel's night time reductions aren't shown here and can lower the target in effect.",
+    plan_inactive: "Inactive rules not shown: @n.",
+    plan_w_missing: "The schedule service is not available on the module (@err). Install econet-sched (docs/schedule.md).",
+    plan_w_clock: "The module's clock is wrong (@time), so entries would run at the wrong time. This page uses the browser's clock.",
+    plan_w_off: "The schedule is switched off: none of the entries below runs until you switch it on in the dashboard.",
+    plan_w_cron: "The module's scheduler (cron) is not running; save the schedule again in the dashboard to start it.",
+    plan_w_live: "Cannot read the burner state (@err); the plan starts from the schedule alone.",
+    plan_lang_missing: "Translation file @file not found; showing English.",
+  },
+  sl: {
+    plan_title: "Urnik gorilnika", plan_edit: "Uredi urnik →", plan_clock: "čas modula @time",
+    plan_boiler: "kotel @value °C", plan_target: "cilj @value °C", plan_effective: "(dejansko @value °C)",
+    plan_pending: "ugasne po koncu cikla, najkasneje ob @until",
+    plan_next: "Naslednje", plan_no_next: "V naslednjih 7 dneh ni nobenega vnosa.", plan_in: "čez @t",
+    plan_today: "danes", plan_tomorrow: "jutri",
+    plan_a_on: "Vklop", plan_a_off: "Izklop", plan_a_off_after: "Izklop po koncu cikla (največ @wait min)",
+    plan_a_target: "Cilj kotla @value °C",
+    plan_f_on: "vklop", plan_f_off: "izklop", plan_f_off_after: "izklop po ciklu", plan_f_target: "@value °C",
+    plan_s_on: "gorilnik vklopljen", plan_s_off: "gorilnik izklopljen", plan_s_after: "ugaša po koncu cikla",
+    plan_s_unknown: "stanje neznano", plan_s_past: "preteklo",
+    plan_l_on: "Vklopljen", plan_l_after: "Izklop po ciklu (najkasneje do konca)", plan_l_off: "Izklopljen",
+    plan_l_past: "Preteklo", plan_l_unknown: "Neznano", plan_l_target: "Cilj kotla", plan_l_now: "Zdaj, temperatura kotla",
+    plan_rest: "še @t", plan_time: "Čas", plan_action: "Dejanje", plan_no_events: "Ta dan ni vnosov.",
+    plan_chart: "Načrtovano stanje gorilnika in cilj kotla, @day",
+    plan_note: "Časi so po uri modula. Med vnosi gorilnik ostane, kot je bil (panel ali dashboard). Nočnih znižanj s panela tu ni, lahko pa znižajo dejanski cilj.",
+    plan_inactive: "Neaktivna pravila niso prikazana: @n.",
+    plan_w_missing: "Storitev za urnik na modulu ni na voljo (@err). Namestite econet-sched (docs/schedule.md).",
+    plan_w_clock: "Ura modula je napačna (@time), zato bi se vnosi izvedli ob napačnem času. Stran uporablja uro brskalnika.",
+    plan_w_off: "Urnik je izklopljen: noben spodnji vnos se ne izvede, dokler ga v dashboardu spet ne vklopite.",
+    plan_w_cron: "Razporejevalnik na modulu (cron) ne teče; v dashboardu ponovno shranite urnik, da se zažene.",
+    plan_w_live: "Stanja gorilnika ni mogoče prebrati (@err); načrt izhaja samo iz urnika.",
+    plan_lang_missing: "Datoteke prevodov @file ni; prikazana je angleščina.",
+  },
+  pl: {
+    plan_title: "Harmonogram palnika", plan_edit: "Edytuj harmonogram →", plan_clock: "czas modułu @time",
+    plan_boiler: "kocioł @value °C", plan_target: "zadana @value °C", plan_effective: "(rzeczywista @value °C)",
+    plan_pending: "wyłączy się po zakończeniu cyklu, najpóźniej o @until",
+    plan_next: "Następne", plan_no_next: "Brak wpisów w ciągu najbliższych 7 dni.", plan_in: "za @t",
+    plan_today: "dziś", plan_tomorrow: "jutro",
+    plan_a_on: "Włączenie", plan_a_off: "Wyłączenie", plan_a_off_after: "Wyłączenie po zakończeniu cyklu (maks. @wait min)",
+    plan_a_target: "Temperatura zadana kotła @value °C",
+    plan_f_on: "wł.", plan_f_off: "wył.", plan_f_off_after: "wył. po cyklu", plan_f_target: "@value °C",
+    plan_s_on: "palnik włączony", plan_s_off: "palnik wyłączony", plan_s_after: "wyłącza się po cyklu",
+    plan_s_unknown: "stan nieznany", plan_s_past: "minione",
+    plan_l_on: "Włączony", plan_l_after: "Wyłączenie po cyklu (najpóźniej do końca)", plan_l_off: "Wyłączony",
+    plan_l_past: "Minione", plan_l_unknown: "Nieznany", plan_l_target: "Temperatura zadana", plan_l_now: "Teraz, temperatura kotła",
+    plan_rest: "jeszcze @t", plan_time: "Godzina", plan_action: "Akcja", plan_no_events: "Brak wpisów tego dnia.",
+    plan_chart: "Planowany stan palnika i temperatura zadana, @day",
+    plan_note: "Godziny według zegara modułu. Między wpisami palnik pozostaje w stanie, w jakim go zostawiono (panel lub dashboard). Obniżeń nocnych z panelu tu nie ma, a mogą obniżyć rzeczywistą temperaturę zadaną.",
+    plan_inactive: "Nieaktywne reguły nie są pokazane: @n.",
+    plan_w_missing: "Usługa harmonogramu nie jest dostępna na module (@err). Zainstaluj econet-sched (docs/schedule.md).",
+    plan_w_clock: "Zegar modułu jest błędny (@time), więc wpisy wykonałyby się o złej porze. Strona używa zegara przeglądarki.",
+    plan_w_off: "Harmonogram jest wyłączony: żaden z poniższych wpisów się nie wykona, dopóki nie włączysz go w dashboardzie.",
+    plan_w_cron: "Harmonogram zadań modułu (cron) nie działa; zapisz harmonogram ponownie w dashboardzie, aby go uruchomić.",
+    plan_w_live: "Nie można odczytać stanu palnika (@err); plan wynika tylko z harmonogramu.",
+    plan_lang_missing: "Brak pliku tłumaczeń @file; wyświetlany jest angielski.",
+  },
+};
+
+window.trans = window.trans || {};  // the translation files assign trans["en"], trans["pl"], …
+let lang = "en";
+let sched = null, schedErr = null;   // /schedule/get and why it failed
+let live = null, liveErr = null;     // regParams.curr
+let setp = null;                     // editParams CO_TEMP_SET: value, minv, maxv
+let clock = null;                    // the module's clock at the last /schedule/get
+let selDay = 0;                      // day shown in the chart: 0 today … 6
+let last = null;                     // last plan, for redrawing the chart on resize
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const two = (n) => String(n).padStart(2, "0");
+const hm = (s) => { const [h, m] = String(s).split(":").map(Number); return h * 60 + m; };
+const clockText = (t) => { const m = ((Math.floor(t + 1e-6) % DAY) + DAY) % DAY; return `${two(Math.floor(m / 60))}:${two(m % 60)}`; };
+const num = (v, d = 1) => (typeof v === "number" ? new Intl.NumberFormat(lang, { maximumFractionDigits: d }).format(v) : "–");
+function dur(min) {
+  min = Math.round(min);
+  const h = Math.floor(min / 60), m = min % 60;
+  return h && m ? `${h} h ${m} min` : h ? `${h} h` : `${m} min`;
+}
+
+function tr(key, vars) {
+  const pick = (l) => OWN[l]?.[key] ?? window.trans[l]?.[key];
+  let s = String(pick(lang) ?? pick("en") ?? key).trim();
+  for (const [k, v] of Object.entries(vars || {})) s = s.split("@" + k).join(String(v));
+  return s;
+}
+const label = (key) => tr(key).replace(/\s*:\s*$/, "");
+
+// Absolute URLs: fetch refuses relative ones when the page was opened as http://user:pass@host/.
+const url = (path) => new URL(path, location.origin);
+async function api(path) {
+  const r = await fetch(url(path), { cache: "no-store", credentials: "same-origin" });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+function loadLang(l) {
+  if (window.trans[l]) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const s = document.createElement("script");
+    s.src = url(LANG_FILES[l]).href;
+    s.onload = () => resolve(!!window.trans[l]);
+    s.onerror = () => resolve(false);
+    document.head.appendChild(s);
+  });
+}
+let langWarning = "";
+function initialLang() {  // same choice as dash.html: ?lang=, then the one picked there, then the browser's
+  const asked = new URLSearchParams(location.search).get("lang");
+  let stored = null;
+  try { stored = localStorage.getItem("dashLang"); } catch (e) { /* storage may be blocked */ }
+  return [asked, stored, (navigator.language || "").slice(0, 2)].find((l) => l in LANG_FILES) || "en";
+}
+async function setLang(l) {
+  langWarning = "";
+  if (!(await loadLang(l)) && l !== "en") { langWarning = tr("plan_lang_missing", { file: LANG_FILES[l] }); l = "en"; }
+  lang = l;
+  try { localStorage.setItem("dashLang", l); } catch (e) { /* storage may be blocked */ }
+  document.documentElement.lang = l;
+  document.title = tr("plan_title");
+  for (const b of document.querySelectorAll("[data-lang]")) b.classList.toggle("on", b.dataset.lang === l);
+  for (const el of document.querySelectorAll("[data-i18n]")) el.textContent = tr(el.dataset.i18n);
+  render();
+}
+
+// ---- time: the module's clock, because cron runs on it ----
+function setClock(s) {
+  const m = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d)/.exec(s?.now || "");
+  clock = m && s.clockOk ? { y: +m[1], mo: +m[2] - 1, d: +m[3], min: +m[4] * 60 + +m[5], at: Date.now() } : null;
+}
+// Today's date and the minute of the day now, on the module's clock moved on by the time since it was
+// read; on the browser's clock while the module's is unknown or wrong.
+function moment() {
+  let y, mo, d, min;
+  if (clock) { ({ y, mo, d } = clock); min = clock.min + (Date.now() - clock.at) / 60000; }
+  else {
+    const n = new Date();
+    y = n.getFullYear(); mo = n.getMonth(); d = n.getDate();
+    min = n.getHours() * 60 + n.getMinutes() + n.getSeconds() / 60;
+  }
+  const shift = Math.floor(min / DAY);
+  return { y, mo, d: d + shift, now: min - shift * DAY };
+}
+const dateOf = (m, k) => new Date(m.y, m.mo, m.d + k, 12);  // noon, clear of DST switches
+
+// ---- the plan: what the schedule will do from now on ----
+// Times are minutes from today's midnight; day k runs from k*DAY to (k+1)*DAY.
+// segs: the burner's planned state, steps: the boiler target, both from now to the end of day 6.
+function plan() {
+  const m = moment(), now = m.now, end = DAYS * DAY;
+  const entries = sched?.entries || [];
+  const enabled = sched?.enabled !== false;
+  const events = [];
+  for (let k = -7; k < DAYS; k++) {  // the week before too, for the state left by earlier entries
+    const dow = dateOf(m, k).getDay();  // 0 = Sunday, like cron
+    entries.forEach((e, i) => {
+      if (e.on && Array.isArray(e.days) && e.days.includes(dow)) events.push({ t: k * DAY + hm(e.time), i, e });
+    });
+  }
+  events.sort((a, b) => a.t - b.t || a.i - b.i);
+
+  // Start from the real burner and target; without them, from what the latest entries left.
+  const before = enabled ? events.filter((v) => v.t <= now) : [];
+  let state;
+  if (typeof live?.mode === "number") state = OFF_MODES.includes(live.mode) ? "off" : "on";
+  else {
+    const prev = before.filter((v) => v.e.action !== "target").pop();
+    state = !prev ? "unknown" : prev.e.action === "on" ? "on" : "off";
+  }
+  let target = setp?.value ?? before.filter((v) => v.e.action === "target").pop()?.e.value ?? null;
+  let afterEnd = null;
+  const p = sched?.pending;  // a turn-off-after-cycle already waiting
+  if (p?.until && state !== "off") {
+    let u = hm(p.until);
+    if (u < now - 5) u += DAY;  // runs past midnight
+    afterEnd = Math.max(u, now);
+    state = "after";
+  }
+
+  const segs = [], steps = [];
+  let segFrom = now, stepFrom = now;
+  const seg = (to) => { to = Math.min(to, end); if (to > segFrom) { segs.push({ from: segFrom, to, state }); segFrom = to; } };
+  const step = (to) => { to = Math.min(to, end); if (to > stepFrom) { steps.push({ from: stepFrom, to, value: target }); stepFrom = to; } };
+  if (enabled) {
+    for (const v of events) {
+      if (v.t <= now || v.t >= end) continue;
+      if (state === "after" && afterEnd <= v.t) { seg(afterEnd); state = "off"; }
+      seg(v.t);
+      const a = v.e.action;
+      if (a === "on") state = "on";
+      else if (a === "off") state = "off";
+      // econet-set sends the off when the cycle ends, at the latest after the wait; a second wait is refused
+      else if (a === "off_after" && (state === "on" || state === "unknown")) { state = "after"; afterEnd = v.t + v.e.wait; }
+      else if (a === "target") { step(v.t); target = v.e.value; }
+    }
+  }
+  if (state === "after") { seg(afterEnd); state = "off"; }
+  seg(end); step(end);
+  return { m, now, events, segs, steps, enabled };
+}
+
+const at = (list, t) => list.find((s) => s.from <= t && t < s.to);
+const dayEvents = (P, k) => P.events.filter((v) => v.t >= k * DAY && v.t < (k + 1) * DAY);
+const isFaded = (P, v) => !P.enabled || v.t <= P.now;
+
+function actionText(e) {
+  return e.action === "target" ? tr("plan_a_target", { value: e.value })
+    : e.action === "off_after" ? tr("plan_a_off_after", { wait: e.wait }) : tr(`plan_a_${e.action}`);
+}
+function flagText(v) {
+  const e = v.e, t = clockText(v.t);
+  return e.action === "target" ? `${t} ${tr("plan_f_target", { value: e.value })}` : `${t} ${tr(`plan_f_${e.action}`)}`;
+}
+function dayWord(P, k) {
+  if (k === 0) return tr("plan_today");
+  if (k === 1) return tr("plan_tomorrow");
+  return new Intl.DateTimeFormat(lang, { weekday: "short", day: "numeric", month: "numeric" }).format(dateOf(P.m, k));
+}
+
+// Planned time on (counted to each off, not through an after-cycle wait) and the targets of day k.
+function daySummary(P, k) {
+  const a = Math.max(k * DAY, P.now), b = (k + 1) * DAY;
+  let on = 0, unknown = false;
+  for (const s of P.segs) {
+    const o = Math.min(b, s.to) - Math.max(a, s.from);
+    if (o <= 0) continue;
+    if (s.state === "on") on += o;
+    if (s.state === "unknown") unknown = true;
+  }
+  const temps = [];
+  for (const s of P.steps) {
+    if (Math.min(b, s.to) <= Math.max(a, s.from) || s.value == null) continue;
+    if (temps[temps.length - 1] !== s.value) temps.push(s.value);
+  }
+  const time = on >= 1 ? (k === 0 ? tr("plan_rest", { t: dur(on) }) : dur(on)) : unknown ? "?" : "–";
+  const temp = !temps.length ? "" : temps.length <= 3 ? `${temps.join(" → ")} °C`
+    : `${Math.min(...temps)}–${Math.max(...temps)} °C`;
+  return [time, temp].filter(Boolean);
+}
+
+// ---- drawing ----
+function render() {
+  if (!$("days")) return;
+  const P = last = plan();
+  renderWarnings(); renderNow(P); renderNext(P); renderDays(P); renderLegend(P); renderChart(P); renderList(P);
+  const off = (sched?.entries || []).filter((e) => !e.on).length;
+  $("inactive").textContent = off ? tr("plan_inactive", { n: off }) : "";
+}
+
+function renderWarnings() {
+  const w = [];
+  if (langWarning) w.push(["", langWarning]);
+  if (schedErr) w.push(["bad", tr("plan_w_missing", { err: schedErr })]);
+  if (sched && !sched.clockOk) w.push(["bad", tr("plan_w_clock", { time: sched.now })]);
+  if (sched?.enabled === false) w.push(["", tr("plan_w_off")]);
+  else if (sched && !sched.cron && (sched.entries || []).some((e) => e.on)) w.push(["", tr("plan_w_cron")]);
+  if (liveErr) w.push(["", tr("plan_w_live", { err: liveErr })]);
+  $("warnings").innerHTML = w.map(([c, msg]) => `<div class="${c}">${esc(msg)}</div>`).join("");
+}
+
+function renderNow(P) {
+  const parts = [];
+  if (typeof live?.mode === "number") {
+    const name = MODE_KEYS[live.mode] ? label(MODE_KEYS[live.mode]) : `mode ${live.mode}`;
+    parts.push(`<span class="badge ${MODE_CLASS[live.mode] ?? ""}">${esc(name)}</span>`);
+  }
+  const vals = [];
+  if (typeof live?.tempCO === "number") vals.push(tr("plan_boiler", { value: num(live.tempCO) }));
+  if (setp) {
+    let t = tr("plan_target", { value: num(setp.value) });
+    if (typeof live?.tempCOSet === "number" && live.tempCOSet !== setp.value) t += " " + tr("plan_effective", { value: num(live.tempCOSet) });
+    vals.push(t);
+  }
+  if (vals.length) parts.push(`<span class="vals">${esc(vals.join(" · "))}</span>`);
+  if (sched?.pending?.until) parts.push(`<span>${esc(tr("plan_pending", { until: sched.pending.until }))}</span>`);
+  const date = new Intl.DateTimeFormat(lang, { day: "numeric", month: "numeric" }).format(dateOf(P.m, 0));
+  parts.push(`<span class="muted">${esc(tr("plan_clock", { time: `${date} ${clockText(P.now)}${clock && sched?.tz ? " " + sched.tz : ""}` }))}</span>`);
+  $("now").innerHTML = parts.join("");
+}
+
+function renderNext(P) {
+  const next = P.enabled ? P.events.filter((v) => v.t > P.now && v.t < DAYS * DAY).slice(0, 3) : [];
+  $("next").innerHTML = !next.length ? `<li class="muted">${esc(tr("plan_no_next"))}</li>` : next.map((v) => {
+    const k = Math.floor(v.t / DAY), wait = v.t - P.now;
+    return `<li><span class="when">${esc(dayWord(P, k))} ${clockText(v.t)}</span><span>${esc(actionText(v.e))}</span>` +
+      (wait < DAY ? `<span class="muted">${esc(tr("plan_in", { t: dur(Math.ceil(wait)) }))}</span>` : "") + "</li>";
+  }).join("");
+}
+
+function renderDays(P) {
+  const pct = (x) => `${(x / DAY * 100).toFixed(3)}%`;
+  const fmt = new Intl.DateTimeFormat(lang, { weekday: "short", day: "numeric", month: "numeric" });
+  let html = `<div class="hours" aria-hidden="true"><span></span><div class="scale">${
+    [0, 6, 12, 18, 24].map((h) => `<span style="left:${h / 24 * 100}%">${two(h)}</span>`).join("")}</div><span></span></div>`;
+  for (let k = 0; k < DAYS; k++) {
+    const a = k * DAY, b = a + DAY, parts = [];
+    if (k === 0) parts.push(`<i class="past" style="width:${pct(P.now)}"></i>`);
+    for (const s of P.segs) {
+      const f = Math.max(a, s.from), t = Math.min(b, s.to);
+      if (t > f && s.state !== "off") parts.push(`<i class="${s.state}" style="left:${pct(f - a)};width:${pct(t - f)}"></i>`);
+    }
+    for (const h of [6, 12, 18]) parts.push(`<i class="tick" style="left:${h / 24 * 100}%"></i>`);
+    for (const v of dayEvents(P, k)) {
+      if (v.e.action === "target" && !isFaded(P, v)) parts.push(`<i class="tdot" style="left:${pct(v.t - a)}"></i>`);
+    }
+    if (k === 0) parts.push(`<i class="nowl" style="left:${pct(P.now)}"></i>`);
+    html += `<button class="dayrow" data-day="${k}" aria-pressed="${k === selDay}">
+      <span class="dname">${esc(k === 0 ? `${tr("plan_today")} ${fmt.format(dateOf(P.m, k))}` : fmt.format(dateOf(P.m, k)))}</span>
+      <span class="bar" aria-hidden="true">${parts.join("")}</span>
+      <span class="dsum">${daySummary(P, k).map((s) => `<span>${esc(s)}</span>`).join("")}</span></button>`;
+  }
+  $("days").innerHTML = html;
+}
+
+function renderLegend(P) {
+  const has = (st) => P.segs.some((s) => s.state === st);
+  const items = [["sw on", "plan_l_on"], ["sw", "plan_l_off"]];
+  if (has("after")) items.push(["sw after", "plan_l_after"]);
+  if (has("unknown")) items.push(["sw unknown", "plan_l_unknown"]);
+  items.push(["sw past", "plan_l_past"], ["lk", "plan_l_target"], ["lk now", "plan_l_now"]);
+  $("legend").innerHTML = items.map(([c, key]) => `<span><i class="${c}"></i>${esc(tr(key))}</span>`).join("");
+}
+
+const SVGNS = "http://www.w3.org/2000/svg";
+function el(tag, attrs, parent, text) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
+  if (text != null) n.textContent = text;
+  if (parent) parent.appendChild(n);
+  return n;
+}
+
+function renderChart(P) {
+  const wrap = $("chartWrap");
+  const W = Math.max(300, Math.round(wrap.clientWidth || 600)), H = 250, narrow = W < 520;
+  const k = selDay, a = k * DAY, b = a + DAY;
+  const from = k === 0 ? P.now : a;  // the projected part of the day
+  const x0 = 48, x1 = W - 14, y0 = 48, y1 = H - 44, bandY = y1 + 8, bandH = 10;
+  const X = (t) => x0 + (t - a) / DAY * (x1 - x0);
+  const dayLong = new Intl.DateTimeFormat(lang, { weekday: "long", day: "numeric", month: "long" }).format(dateOf(P.m, k));
+  $("dayTitle").textContent = dayLong;
+
+  // °C scale: the target's allowed range, the planned targets and (today) the boiler now
+  const steps = P.steps.filter((s) => s.to > from && s.from < b);
+  const temp = k === 0 && typeof live?.tempCO === "number" ? live.tempCO : null;
+  const vals = steps.map((s) => s.value).filter((v) => v != null);
+  if (setp) vals.push(setp.minv, setp.maxv);
+  if (temp != null) vals.push(temp);
+  if (!vals.length) vals.push(40, 80);
+  const span = Math.max(...vals) - Math.min(...vals), tick = span > 30 ? 10 : 5;
+  const lo = Math.floor((Math.min(...vals) - 2) / tick) * tick, hi = Math.ceil((Math.max(...vals) + 2) / tick) * tick;
+  const Y = (v) => y1 - (v - lo) / (hi - lo) * (y1 - y0);
+
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": tr("plan_chart", { day: dayLong }) });
+  const defs = el("defs", {}, svg);
+  const g = el("linearGradient", { id: "afterGrad" }, defs);
+  el("stop", { offset: "0", class: "g0" }, g); el("stop", { offset: "1", class: "g1" }, g);
+
+  for (let v = lo; v <= hi; v += tick) {
+    el("line", { x1: x0, x2: x1, y1: Y(v), y2: Y(v), class: "grid" }, svg);
+    el("text", { x: x0 - 6, y: Y(v), dy: ".32em", "text-anchor": "end", class: "ax" }, svg, v === hi ? `${v} °C` : v);
+  }
+  const every = narrow ? 6 : 3;
+  for (let h = 0; h <= 24; h += every) {
+    const x = X(a + h * 60);
+    el("line", { x1: x, x2: x, y1: y0, y2: y1, class: "grid" }, svg);
+    el("text", { x, y: bandY + bandH + 16, "text-anchor": h === 0 ? "start" : h === 24 ? "end" : "middle", class: "ax" }, svg, two(h));
+  }
+
+  // state band under the plot, like the week strips
+  el("rect", { x: x0, y: bandY, width: x1 - x0, height: bandH, rx: 3, class: "band" }, svg);
+  for (const s of P.segs) {
+    const f = Math.max(a, s.from), t = Math.min(b, s.to);
+    if (t <= f || s.state === "off") continue;
+    const attrs = { x: X(f), y: bandY, width: X(t) - X(f), height: bandH, rx: 2 };
+    if (s.state === "after") el("rect", { ...attrs, fill: "url(#afterGrad)" }, svg);
+    else el("rect", { ...attrs, class: `band ${s.state}` }, svg);
+  }
+  if (k === 0) el("rect", { x: x0, y: bandY, width: X(P.now) - x0, height: bandH, class: "band past" }, svg);
+
+  // flags: a hairline down to the band, a marker at the top of the plot, the label above it
+  const evs = dayEvents(P, k);
+  const flags = el("g", {}, svg);
+  for (const v of evs) {
+    const x = X(v.t), gEl = el("g", { class: isFaded(P, v) ? "faded" : "" }, flags), my = y0 - 8;
+    el("line", { x1: x, x2: x, y1: my + 5, y2: bandY, class: "flagline" }, gEl);
+    const act = v.e.action;
+    if (act === "target") el("circle", { cx: x, cy: my, r: 4.5, class: "m-target" }, gEl);
+    else if (act === "on") el("path", { d: `M${x} ${my - 5}L${x + 5} ${my + 4}H${x - 5}Z`, class: "m-on" }, gEl);
+    else el("path", { d: `M${x} ${my + 5}L${x + 5} ${my - 4}H${x - 5}Z`, class: act === "off" ? "m-off" : "m-after" }, gEl);
+    v.g = gEl;
+  }
+
+  // planned target: faint all along, solid where the burner is planned on
+  let d = "", lastX = null;
+  for (const s of steps) {
+    const f = Math.max(from, s.from), t = Math.min(b, s.to);
+    if (t <= f || s.value == null) { lastX = null; continue; }
+    d += lastX !== null && Math.abs(lastX - X(f)) < 0.5 ? ` V${Y(s.value)} H${X(t)}` : ` M${X(f)} ${Y(s.value)} H${X(t)}`;
+    lastX = X(t);
+  }
+  if (d) {
+    const clip = el("clipPath", { id: "onClip" }, defs);
+    for (const s of P.segs) {
+      const f = Math.max(from, s.from), t = Math.min(b, s.to);
+      if (t > f && (s.state === "on" || s.state === "after")) el("rect", { x: X(f), y: y0 - 4, width: X(t) - X(f), height: y1 - y0 + 8 }, clip);
+    }
+    el("path", { d, class: "tline faint" }, svg);
+    el("path", { d, class: "tline", "clip-path": "url(#onClip)" }, svg);
+  }
+
+  // now: a line through the plot and the band, and the boiler temperature on it
+  let dotBox = null;
+  if (k === 0) {
+    const x = X(P.now);
+    el("line", { x1: x, x2: x, y1: y0, y2: bandY + bandH, class: "nowline" }, svg);
+    if (temp != null) {
+      el("circle", { cx: x, cy: Y(temp), r: 4.5, class: "dot" }, svg);
+      const left = x > x1 - 70;
+      el("text", { x: left ? x - 9 : x + 9, y: Y(temp), dy: ".32em", "text-anchor": left ? "end" : "start", class: "dotlabel" }, svg, `${num(temp)} °C`);
+      dotBox = { x: left ? x - 70 : x, y: Y(temp) };
+    }
+  }
+
+  const cross = el("line", { y1: y0, y2: bandY + bandH, class: "cross", visibility: "hidden" }, svg);
+  const hit = el("rect", { x: x0, y: y0 - 16, width: x1 - x0, height: bandY + bandH - y0 + 16, fill: "transparent" }, svg);
+  wrap.querySelector("svg")?.remove();
+  wrap.prepend(svg);
+
+  // the target where the line starts, unless it would sit on the boiler temperature's label
+  const s0 = steps.find((s) => s.value != null && Math.min(b, s.to) > Math.max(from, s.from));
+  if (s0) {
+    const sx = X(Math.max(from, s0.from)) + 4, sy = Y(s0.value) - 7;
+    if (!dotBox || Math.abs(dotBox.y - sy) > 16 || sx > dotBox.x + 80 || sx + 50 < dotBox.x) {
+      el("text", { x: sx, y: sy, class: "tval" }, svg, `${num(s0.value)} °C`);
+    }
+  }
+
+  // flag labels in two rows above the markers; one that fits in neither is left to the list below
+  const rows = [[], []];
+  for (const v of evs) {
+    const t = el("text", { y: 0, class: "flag" }, v.g, flagText(v));
+    const w = t.getComputedTextLength();
+    const lx = Math.min(Math.max(X(v.t) - w / 2, 2), W - 2 - w);
+    const r = rows.findIndex((row) => row.every(([l, rr]) => lx + w + 8 < l || lx > rr + 8));
+    if (r < 0) { t.remove(); continue; }
+    rows[r].push([lx, lx + w]);
+    t.setAttribute("x", lx); t.setAttribute("y", r === 0 ? 29 : 13);
+  }
+
+  // hover: a crosshair and the planned state and target at that minute
+  const tip = $("tip");
+  const move = (ev) => {
+    const box = svg.getBoundingClientRect(), scale = W / box.width;
+    const x = Math.min(Math.max((ev.clientX - box.left) * scale, x0), x1);
+    const t = a + Math.round((x - x0) / (x1 - x0) * DAY);
+    cross.setAttribute("x1", x); cross.setAttribute("x2", x); cross.setAttribute("visibility", "visible");
+    tip.replaceChildren();
+    const add = (tag, text) => { const n = document.createElement(tag); n.textContent = text; tip.appendChild(n); };
+    if (t < from) { add("b", tr("plan_s_past")); add("span", clockText(t)); }
+    else {
+      const s = at(P.segs, t), st = at(P.steps, t);
+      add("b", st?.value != null ? `${num(st.value)} °C` : "–");
+      add("span", tr(`plan_s_${s?.state ?? "unknown"}`));
+      add("span", clockText(t === b ? t - 1 : t));
+    }
+    tip.hidden = false;
+    const px = x / scale, tw = tip.offsetWidth;
+    tip.style.left = `${px + 12 + tw > box.width ? px - 12 - tw : px + 12}px`;
+  };
+  hit.addEventListener("pointermove", move);
+  hit.addEventListener("pointerdown", move);
+  hit.addEventListener("pointerleave", () => { tip.hidden = true; cross.setAttribute("visibility", "hidden"); });
+  tip.hidden = true;
+  wrap.dataset.w = W;
+}
+
+function renderList(P) {
+  const evs = dayEvents(P, selDay);
+  $("dayList").innerHTML = !evs.length ? `<p class="muted">${esc(tr("plan_no_events"))}</p>` :
+    `<table><tr><th>${esc(tr("plan_time"))}</th><th>${esc(tr("plan_action"))}</th></tr>${
+      evs.map((v) => `<tr class="${isFaded(P, v) ? "faded" : ""}"><td>${clockText(v.t)}</td><td>${esc(actionText(v.e))}</td></tr>`).join("")
+    }</table>`;
+}
+
+// ---- data ----
+async function refreshSched() {
+  try { sched = await api("/schedule/get"); schedErr = null; }
+  catch (e) { schedErr = e.message; }
+  setClock(sched);
+  render();
+}
+async function refreshLive() {
+  try {
+    const c = (await api("/econet/regParams")).curr;
+    if (c && typeof c.mode === "number") live = c;  // the module sometimes sends an empty curr; keep the last
+    liveErr = null;
+  } catch (e) { liveErr = e.message; live = null; }
+  render();
+}
+async function refreshParams() {
+  try { setp = (await api("/econet/editParams")).data?.[SETPOINT] ?? setp; }
+  catch (e) { /* the target then comes from the schedule; the state read reports a dead module */ }
+  render();
+}
+
+$("langs").onclick = (ev) => { if (ev.target.dataset.lang) setLang(ev.target.dataset.lang); };
+$("days").onclick = (ev) => {
+  const row = ev.target.closest("[data-day]");
+  if (row) { selDay = Number(row.dataset.day); render(); }
+};
+new ResizeObserver(() => {
+  if (last && Number($("chartWrap").dataset.w) !== Math.max(300, Math.round($("chartWrap").clientWidth))) renderChart(last);
+}).observe($("chartWrap"));
+
+(async () => {
+  await loadLang("en");  // fallback for keys missing in the chosen language
+  await setLang(initialLang());
+  await Promise.all([refreshSched(), refreshLive(), refreshParams()]);
+  const every = (fn, ms) => setInterval(() => { if (!document.hidden) fn(); }, ms);
+  every(refreshSched, SCHED_MS);
+  every(refreshLive, LIVE_MS);
+  every(refreshParams, PARAMS_MS);
+  every(render, TICK_MS);  // moves the now-line
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refreshSched(); refreshLive(); } });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,237 @@
+{
+  "name": "Daily max temperature",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6,
+              "triggerAtMinute": 20
+            }
+          ]
+        }
+      },
+      "id": "3c5e7a90-0001-4b2d-8e1f-b0c1d2e3f401",
+      "name": "Every 6 hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        100
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "3c5e7a90-0002-4b2d-8e1f-b0c1d2e3f402",
+      "name": "Run by hand",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Where the daily max temperature is taken: your location in decimal degrees,\n// e.g. LATITUDE = 48.21 and LONGITUDE = 16.37 for Vienna.\nconst LATITUDE = null;\nconst LONGITUDE = null;\nif (!Number.isFinite(LATITUDE) || !Number.isFinite(LONGITUDE))\n  throw new Error('Set LATITUDE and LONGITUDE in the Location node');\nreturn [{ json: { latitude: LATITUDE, longitude: LONGITUDE } }];"
+      },
+      "id": "3c5e7a90-0007-4b2d-8e1f-b0c1d2e3f407",
+      "name": "Location",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "temperature"
+        },
+        "returnAll": true
+      },
+      "id": "3c5e7a90-0003-4b2d-8e1f-b0c1d2e3f403",
+      "name": "Read temperatures",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        480,
+        200
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "url": "=https://historical-forecast-api.open-meteo.com/v1/forecast?latitude={{ $('Location').first().json.latitude }}&longitude={{ $('Location').first().json.longitude }}&daily=temperature_2m_max&timezone=auto&start_date={{ $now.minus({ days: 400 }).toISODate() }}&end_date={{ $now.minus({ days: 1 }).toISODate() }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "3c5e7a90-0004-4b2d-8e1f-b0c1d2e3f404",
+      "name": "Open-Meteo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        200
+      ],
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "notes": "Open-Meteo Historical Forecast API (no key, CC BY 4.0) at the point set in Location. Daily max temperature for the last 400 days up to yesterday."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Open-Meteo returns the daily max temperature for the last 400 days up to yesterday. Writes the days the\n// table doesn't have yet and the days whose value Open-Meteo has corrected since. Stops here when nothing changed.\nconst d = $input.first().json.daily ?? {};\nif (!Array.isArray(d.time) || !Array.isArray(d.temperature_2m_max))\n  throw new Error(`Open-Meteo: unexpected reply ${JSON.stringify($input.first().json).slice(0, 200)}`);\nconst known = new Map($('Read temperatures').all()\n  .filter((i) => i.json.date)\n  .map((i) => [String(i.json.date).slice(0, 10), i.json.tmax]));\nconst out = [];\nd.time.forEach((date, k) => {\n  const t = d.temperature_2m_max[k];\n  if (t == null || !Number.isFinite(Number(t))) return;  // day without data: next run\n  const tmax = Math.round(Number(t) * 10) / 10;\n  const before = known.get(date);\n  if (before == null || Math.abs(Number(before) - tmax) >= 0.05) out.push({ json: { date, tmax } });\n});\nreturn out;"
+      },
+      "id": "3c5e7a90-0005-4b2d-8e1f-b0c1d2e3f405",
+      "name": "New and corrected days",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "temperature"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "date",
+              "condition": "eq",
+              "keyValue": "={{ $json.date }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "date": "={{ $json.date }}",
+            "tmax": "={{ $json.tmax }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "date",
+              "displayName": "date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "tmax",
+              "displayName": "tmax",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "3c5e7a90-0006-4b2d-8e1f-b0c1d2e3f406",
+      "name": "Write temperatures",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Every 6 hours": {
+      "main": [
+        [
+          {
+            "node": "Location",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run by hand": {
+      "main": [
+        [
+          {
+            "node": "Location",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read temperatures": {
+      "main": [
+        [
+          {
+            "node": "Open-Meteo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open-Meteo": {
+      "main": [
+        [
+          {
+            "node": "New and corrected days",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New and corrected days": {
+      "main": [
+        [
+          {
+            "node": "Write temperatures",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Location": {
+      "main": [
+        [
+          {
+            "node": "Read temperatures",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

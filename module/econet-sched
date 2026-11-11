@@ -1,0 +1,277 @@
+#!/usr/bin/python
+"""Schedule service for dash.html: keeps the dashboard's schedule and turns it into cron jobs.
+
+lighttpd forwards /schedule/* here (FastCGI on 127.0.0.1:50008), behind the module's login.
+    GET  /schedule/get       the schedule, module clock, cron state, recent runs and a pending off
+    POST /schedule/set       {"entries": [...]} as application/json; replaces the schedule
+    POST /schedule/enable    {"enabled": false}: switch the whole schedule off (entries kept) or back on
+    POST /schedule/entry     {"id": "1a2b3c4d", "on": false}: switch one entry off or on
+    GET  /schedule/pending   the turn-off-after-cycle wait in progress, or null
+    POST /schedule/offafter  {"wait": 90}: turn the burner off when its cycle ends, at most after 90 min
+    POST /schedule/cancel    {}: cancel that wait (also one started by cron)
+An entry: {"id": "1a2b3c4d" (given by the service), "on": true, "time": "05:30", "days": [1, 2, 3, 4, 5],
+           "action": "on" | "off" | "off_after" | "target", "value": 65 (target), "wait": 90 (off_after)}
+Days are cron's: 0 = Sunday ... 6 = Saturday. The jobs run econet-set at the module's own clock.
+"""
+import binascii
+import json
+import os
+import re
+import signal
+import subprocess
+import time
+
+from flup.server.fcgi import WSGIServer
+
+ADDR = ("127.0.0.1", 50008)
+STORE = "/etc/econet-schedule.json"
+CRONTAB = "/etc/crontabs/root"
+CRON_INIT = "/etc/init.d/cron"
+SETTER = "/root/econet-set"
+BEGIN = "# >>> econet-sched: generated from the dashboard's Schedule tab, edit it there"
+END = "# <<< econet-sched"
+ACTIONS = {"on": ("BOILER_CONTROL", 1), "off": ("BOILER_CONTROL", 0), "off_after": ("BOILER_CONTROL", 0),
+           "target": ("CO_TEMP_SET", None)}
+WAIT_MIN, WAIT_MAX = 5, 240  # minutes an off_after may wait for the end of the cycle
+PENDING = "/tmp/econet-offafter.json"  # written by econet-set while it waits
+MAX_ENTRIES = 50
+CLOCK_OK_YEAR = 2025  # the module boots at 2019-11-20 and keeps that date until NTP sets the clock
+LOG_LINE = re.compile(r"^\w{3} (\w{3} +\d+ [\d:]+ \d{4}) \S+ econet-set: (.*)$")
+
+
+def new_id(taken):
+    while True:
+        i = binascii.hexlify(os.urandom(4)).decode("ascii")
+        if i not in taken:
+            return i
+
+
+def load():
+    """(entries, enabled) from the store; a missing store is an empty schedule that is on."""
+    try:
+        with open(STORE) as f:
+            store = json.load(f)
+    except (IOError, ValueError):
+        store = {}
+    entries, enabled = store.get("entries", []), store.get("enabled", True)
+    if any("id" not in e for e in entries):  # stores from before ids: give each entry one, cron unchanged
+        taken = set(e["id"] for e in entries if "id" in e)
+        for e in entries:
+            if "id" not in e:
+                e["id"] = new_id(taken)
+                taken.add(e["id"])
+        write_file(STORE, json.dumps({"enabled": enabled, "entries": entries}, indent=1) + "\n")
+    return entries, enabled
+
+
+def clean(entries):
+    if not isinstance(entries, list) or len(entries) > MAX_ENTRIES:
+        raise ValueError("entries must be a list of at most %d" % MAX_ENTRIES)
+    out = []
+    for i, e in enumerate(entries, 1):
+        try:
+            days = sorted(set(int(d) for d in e["days"]))
+            if (not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", e["time"]) or not days
+                    or days[0] < 0 or days[-1] > 6 or e["action"] not in ACTIONS):
+                raise ValueError()
+            entry = {"on": bool(e.get("on", True)), "time": e["time"], "days": days, "action": e["action"]}
+            if e["action"] == "target":
+                value = e["value"]
+                # econet-set checks the controller's own min-max before each write
+                if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
+                    raise ValueError()
+                entry["value"] = value
+            if e["action"] == "off_after":
+                entry["wait"] = check_wait(e.get("wait", 90))
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("entry %d is invalid" % i)
+        out.append(entry)
+    # keep each entry's id (the dashboard switches single entries by it), give new entries one
+    taken = set()
+    for e, raw in zip(out, entries):
+        rid = raw.get("id")
+        ok = isinstance(rid, (type(u""), str)) and re.match(r"^[0-9a-f]{8}$", rid) and rid not in taken
+        e["id"] = str(rid) if ok else new_id(taken)
+        taken.add(e["id"])
+    return sorted(out, key=lambda e: e["time"])
+
+
+def check_wait(wait):
+    if isinstance(wait, bool) or not isinstance(wait, int) or not WAIT_MIN <= wait <= WAIT_MAX:
+        raise ValueError("wait must be %d-%d minutes" % (WAIT_MIN, WAIT_MAX))
+    return wait
+
+
+def cron_lines(entries):
+    lines = []
+    for e in entries:
+        if not e["on"]:
+            continue
+        name, value = ACTIONS[e["action"]]
+        hour, minute = e["time"].split(":")
+        line = "%d %d * * %s %s %s %s" % (int(minute), int(hour), ",".join(str(d) for d in e["days"]),
+                                         SETTER, name, e["value"] if value is None else value)
+        if e["action"] == "off_after":
+            line += " --after-cycle %d" % e["wait"]
+        lines.append(line)
+    return lines
+
+
+def write_file(path, text):
+    with open(path + ".tmp", "w") as f:
+        f.write(text)
+    os.rename(path + ".tmp", path)
+
+
+def save(entries, enabled):
+    try:
+        with open(CRONTAB) as f:
+            old = f.read().splitlines()
+    except IOError:
+        old = []
+    keep, inside = [], False  # keep cron jobs added by hand, outside our block
+    for line in old:
+        if line == BEGIN:
+            inside = True
+        elif line == END:
+            inside = False
+        elif not inside:
+            keep.append(line)
+    if not os.path.isdir(os.path.dirname(CRONTAB)):
+        os.makedirs(os.path.dirname(CRONTAB))
+    # switched off: no jobs in the block, the entries stay in the store for switching back on
+    jobs = cron_lines(entries) if enabled else ["# switched off in the dashboard, the entries are kept"]
+    write_file(CRONTAB, "\n".join(keep + [BEGIN] + jobs + [END]) + "\n")
+    write_file(STORE, json.dumps({"enabled": enabled, "entries": entries}, indent=1) + "\n")
+    subprocess.call([CRON_INIT, "enable"])
+    subprocess.call([CRON_INIT, "restart"])
+    subprocess.call(["logger", "-t", "econet-sched", "schedule saved, %d entries, %s"
+                     % (len(entries), "on" if enabled else "switched off")])
+
+
+def cron_running():
+    with open(os.devnull, "w") as null:
+        return subprocess.call(["pidof", "crond"], stdout=null, stderr=null) == 0
+
+
+def runs():
+    """Latest econet-set results from syslog, newest first."""
+    try:
+        out = subprocess.Popen(["logread", "-e", "econet-set"], stdout=subprocess.PIPE).communicate()[0]
+    except OSError:
+        return []
+    result = []
+    for line in out.decode("utf-8", "replace").splitlines():
+        m = LOG_LINE.match(line)
+        if m:
+            result.append({"time": m.group(1), "msg": m.group(2)})
+    return result[-15:][::-1]
+
+
+def pending():
+    """The after-cycle wait econet-set is running (from cron or the dashboard), or None."""
+    try:
+        with open(PENDING) as f:
+            info = json.load(f)
+        os.kill(info["pid"], 0)
+        return info
+    except (IOError, OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def start_off_after(wait):
+    if pending():
+        raise ValueError("the burner is already waiting to turn off")
+    # through sh with "&" so the wait runs on its own and its exit doesn't leave a zombie here
+    with open(os.devnull, "w") as null:
+        subprocess.call(["/bin/sh", "-c", 'exec "$0" "$@" </dev/null >/dev/null 2>&1 &', SETTER,
+                         "BOILER_CONTROL", "0", "--after-cycle", str(check_wait(wait))], stdout=null, stderr=null)
+    for _ in range(30):  # econet-set first checks the parameter, then records the wait
+        if pending():
+            break
+        time.sleep(0.2)
+    return pending()
+
+
+def cancel_off_after():
+    info = pending()
+    if info:
+        os.kill(info["pid"], signal.SIGTERM)
+        try:
+            os.remove(PENDING)
+        except OSError:
+            pass
+        subprocess.call(["logger", "-t", "econet-set", "%s=%s after cycle cancelled from the dashboard"
+                         % (info.get("name"), info.get("value"))])
+
+
+def status():
+    now = time.localtime()
+    entries, enabled = load()
+    return {"entries": entries, "enabled": enabled,
+            "now": time.strftime("%Y-%m-%d %H:%M", now), "tz": time.strftime("%Z", now),
+            "clockOk": now.tm_year >= CLOCK_OK_YEAR, "cron": cron_running(), "runs": runs(), "pending": pending()}
+
+
+def read_json(environ):
+    # JSON only: a plain form on another site can't send it with the browser's saved login
+    if not environ.get("CONTENT_TYPE", "").startswith("application/json"):
+        raise ValueError("send application/json")
+    size = int(environ.get("CONTENT_LENGTH") or 0)
+    if size > 65536:
+        raise ValueError("request too large")
+    data = json.loads(environ["wsgi.input"].read(size).decode("utf-8") or "{}")
+    if not isinstance(data, dict):
+        raise ValueError("expected a JSON object")
+    return data
+
+
+def app(environ, start_response):
+    path = environ.get("REQUEST_URI") or environ.get("SCRIPT_NAME", "") + environ.get("PATH_INFO", "")
+    action = path.split("?")[0].rstrip("/").split("/")[-1]
+    method = environ.get("REQUEST_METHOD", "GET")
+    try:
+        if action == "get" and method == "GET":
+            code, body = "200 OK", status()
+        elif action == "set" and method == "POST":
+            save(clean(read_json(environ).get("entries")), load()[1])
+            code, body = "200 OK", status()
+        elif action == "entry" and method == "POST":
+            data = read_json(environ)
+            entries, enabled = load()
+            match = [e for e in entries if e["id"] == data.get("id")]
+            if not match or not isinstance(data.get("on"), bool):
+                raise ValueError("unknown entry, or on is not true/false")
+            match[0]["on"] = data["on"]
+            save(entries, enabled)
+            code, body = "200 OK", status()
+        elif action == "enable" and method == "POST":
+            enabled = read_json(environ).get("enabled")
+            if not isinstance(enabled, bool):
+                raise ValueError("enabled must be true or false")
+            save(load()[0], enabled)
+            code, body = "200 OK", status()
+        elif action == "pending" and method == "GET":
+            code, body = "200 OK", {"pending": pending()}
+        elif action == "offafter" and method == "POST":
+            code, body = "200 OK", {"pending": start_off_after(read_json(environ).get("wait", 90))}
+        elif action == "cancel" and method == "POST":
+            read_json(environ)
+            cancel_off_after()
+            code, body = "200 OK", {"pending": None}
+        else:
+            code, body = "404 Not Found", {"error": "unknown request"}
+    except ValueError as e:
+        code, body = "400 Bad Request", {"error": str(e)}
+    except Exception as e:
+        code, body = "500 Internal Server Error", {"error": str(e)}
+    data = json.dumps(body).encode("utf-8")
+    start_response(code, [("Content-Type", "application/json"), ("Cache-Control", "no-store"),
+                          ("Content-Length", str(len(data)))])
+    # The module's flup is patched to write the app's result in one piece and asserts it is a str,
+    # so return the body itself rather than a list (the ecoNET app does the same).
+    return data
+
+
+if __name__ == "__main__":
+    WSGIServer(app, bindAddress=ADDR).run()

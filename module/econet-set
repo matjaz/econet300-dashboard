@@ -1,0 +1,209 @@
+#!/usr/bin/python
+"""Set a controller parameter through the module's own API. Meant for cron.
+
+    econet-set BOILER_CONTROL 1     # burner on
+    econet-set BOILER_CONTROL 0     # burner off (it burns out first)
+    econet-set CO_TEMP_SET 65       # boiler target, within the controller's range
+    econet-set BOILER_CONTROL 0 --after-cycle 90
+                                    # wait until the burner ends its cycle (off, supervision,
+                                    # stopped, halted or burning off), at most 90 min, then send
+
+Talks FastCGI straight to the ecoNET app on 127.0.0.1:50007, the port lighttpd
+forwards /econet/* to, so it needs no web password. Writes one line per run to
+syslog: logread -e econet-set
+"""
+import json
+import os
+import socket
+import struct
+import subprocess
+import sys
+import time
+
+try:
+    from urllib import urlencode  # Python 2 on the module
+except ImportError:
+    from urllib.parse import urlencode
+
+FCGI_ADDR = ("127.0.0.1", 50007)
+BEGIN, END, PARAMS, STDIN, STDOUT = 1, 3, 4, 5, 6
+CHECK_DELAY = 10  # s for the controller to take the new value
+TRIES = 3
+# States in which a burner cycle has ended (regParams.curr.mode). 1 and 5 follow ecoNET's label
+# order and are not confirmed on a panel yet.
+CYCLE_END = (0, 1, 4, 5, 7)
+# ecoNET's own label order (docs/dashboard.md#burner-states); 0, 2, 3, 4, 6, 7 and 12 are confirmed on a panel.
+MODE_NAMES = dict(enumerate(["Off", "Stopped", "Fire up", "Work", "Supervision", "Halted", "Cleaning",
+                             "Burning off", "Alarm", "Manual", "Unsealing", "Other", "Stabilization", "Purge",
+                             "Check flame", "Flame extinguished", "Prevention", "Work grate",
+                             "Supervision grate", "Calibration", "Chimney sweep", "Open door"]))
+POLL = 30      # s between state checks while waiting
+MINUTE = 60
+PENDING = "/tmp/econet-offafter.json"  # the wait in progress, for the dashboard to show and cancel
+
+
+def record(rtype, content=b""):
+    return struct.pack("!BBHHBx", 1, rtype, 1, len(content), 0) + content
+
+
+def pair(name, value):
+    name, value = name.encode("ascii"), value.encode("ascii")
+    return struct.pack("!BB", len(name), len(value)) + name + value  # all < 128 bytes
+
+
+def recv_exact(sock, n):
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise IOError("connection closed by the ecoNET app")
+        data += chunk
+    return data
+
+
+def api(method, **query):
+    env = {"REQUEST_METHOD": "GET", "SCRIPT_NAME": "/econet", "PATH_INFO": "/" + method,
+           "QUERY_STRING": urlencode(sorted(query.items())), "SERVER_NAME": "127.0.0.1",
+           "SERVER_PORT": "80", "SERVER_PROTOCOL": "HTTP/1.0"}
+    sock = socket.create_connection(FCGI_ADDR, timeout=30)
+    try:
+        sock.sendall(record(BEGIN, struct.pack("!HB5x", 1, 0))  # responder, close when done
+                     + record(PARAMS, b"".join(pair(k, v) for k, v in env.items()))
+                     + record(PARAMS) + record(STDIN))
+        out = b""
+        while True:
+            _, rtype, _, length, padding = struct.unpack("!BBHHBx", recv_exact(sock, 8))
+            content = recv_exact(sock, length + padding)[:length]
+            if rtype == STDOUT:
+                out += content
+            elif rtype == END:
+                break
+    finally:
+        sock.close()
+    body = out.split(b"\r\n\r\n", 1)[-1]
+    return json.loads(body.decode("utf-8"))
+
+
+def current(name):
+    """Value the controller reports now, or None if it doesn't report this name."""
+    if name == "BOILER_CONTROL":  # write-only; the burner state shows in regParams.curr.mode
+        for _ in range(3):  # regParams sometimes comes back with an empty "curr"
+            mode = api("regParams").get("curr", {}).get("mode")
+            if mode is not None:
+                return int(mode not in (0, 7))  # 0 off, 7 burning off
+            time.sleep(2)
+        return None
+    param = api("editParams").get("data", {}).get(name)
+    return None if param is None else param.get("value")
+
+
+def in_range(name, value):
+    """The module itself doesn't range-check BOILER_CONTROL, so check everything here."""
+    if name == "BOILER_CONTROL":
+        return value in (0, 1)
+    param = api("editParams").get("data", {}).get(name)
+    return param is None or param.get("minv", value) <= value <= param.get("maxv", value)
+
+
+def mode_name(mode):
+    return "unknown" if mode is None else "%s (%s)" % (MODE_NAMES.get(mode, "mode"), mode)
+
+
+def mode_now():
+    for _ in range(3):  # regParams sometimes comes back with an empty "curr"
+        try:
+            mode = api("regParams").get("curr", {}).get("mode")
+        except Exception:
+            mode = None
+        if mode is not None:
+            return mode
+        time.sleep(2)
+    return None
+
+
+def waiting_pid():
+    """pid of an after-cycle wait that is still running, else None."""
+    try:
+        with open(PENDING) as f:
+            pid = json.load(f)["pid"]
+        os.kill(pid, 0)
+        return pid
+    except (IOError, OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def wait_for_cycle_end(name, value, minutes):
+    """Wait until the burner's cycle has ended, at most `minutes`; returns a note for the log."""
+    start = time.time()
+    deadline = start + minutes * MINUTE
+    with open(PENDING, "w") as f:
+        json.dump({"pid": os.getpid(), "name": name, "value": value, "wait": minutes,
+                   "since": time.strftime("%H:%M", time.localtime(start)),
+                   "until": time.strftime("%H:%M", time.localtime(deadline))}, f)
+    try:
+        while True:
+            mode = mode_now()
+            if mode in CYCLE_END:
+                return "burner in %s after %d min" % (mode_name(mode), (time.time() - start) // MINUTE)
+            if time.time() >= deadline:
+                return "waited %d min, burner still in %s, sending anyway" % (minutes, mode_name(mode))
+            time.sleep(POLL)
+    finally:
+        try:
+            os.remove(PENDING)
+        except OSError:
+            pass
+
+
+def log(msg):
+    subprocess.call(["logger", "-t", "econet-set", msg])
+    sys.stderr.write(msg + "\n")
+
+
+def main():
+    args, wait = sys.argv[1:], None
+    if "--after-cycle" in args:
+        i = args.index("--after-cycle")
+        try:
+            wait = int(args[i + 1])
+        except (IndexError, ValueError):
+            wait = 0
+        del args[i:i + 2]
+    if len(args) != 2 or wait is not None and wait < 1:
+        sys.stderr.write(__doc__)
+        return 2
+    name, value = args[0], json.loads(args[1])
+    try:
+        if not in_range(name, value):
+            log("%s=%s refused: outside the controller's allowed range" % (name, value))
+            return 1
+    except Exception as e:
+        log("%s=%s not sent, cannot read parameters: %s" % (name, value, e))
+        return 1
+    if wait:
+        if waiting_pid():
+            log("%s=%s after cycle not started: another wait is already running" % (name, value))
+            return 0
+        log("%s=%s waits for the end of the burner cycle, at most %d min" % (name, value, wait))
+        log("%s=%s: %s" % (name, value, wait_for_cycle_end(name, value, wait)))
+    now = None
+    for attempt in range(1, TRIES + 1):
+        try:
+            res = api("newParam", newParamName=name, newParamValue=json.dumps(value))
+            if res.get("result") != "OK":
+                raise ValueError(json.dumps(res))
+            time.sleep(CHECK_DELAY)
+            now = current(name)
+            if now is None or now == value:
+                log("%s=%s sent, controller reports %s" % (name, value, "nothing" if now is None else now))
+                return 0
+        except Exception as e:
+            now = "error: %s" % e
+        if attempt < TRIES:
+            time.sleep(CHECK_DELAY)
+    log("%s=%s FAILED after %d tries, last: %s" % (name, value, TRIES, now))
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

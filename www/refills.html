@@ -1,0 +1,779 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hopper refills</title>
+<!--
+  Hopper refill log: log a refill, see the usage in kg next to the daily max temperature, and list the
+  entries, all through an n8n webhook (n8n/refills.workflow.json; temperatures come from
+  n8n/temperature.workflow.json). Webhook URL, token (X-Token) and bag weight are entered under
+  Settings and kept in this browser. Setup: docs/refill-log.md
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f3; --card: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #deded8;
+    --accent: #b5541c; --accent-text: #ffffff; --bar: #b5541c; --temp: #2a78d6; --ok: #2e7d32; --err: #c62828; --new: #fff3e0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161614; --card: #22221f; --text: #ecece8; --muted: #a3a39c; --line: #3a3a35;
+      --accent: #e07b3c; --accent-text: #161614; --bar: #d96a2e; --temp: #3987e5; --ok: #81c784; --err: #ef9a9a; --new: #3a2a1c;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 32rem; margin: 0 auto; padding: 16px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin: 0.4rem 0 1rem; }
+  h1 { font-size: 1.4rem; margin: 0; }
+  h2 { font-size: 1.1rem; margin: 0 0 0.6rem; }
+  .langs { display: flex; gap: 4px; }
+  .langs button { min-height: 32px; padding: 0 9px; font-size: 13px; }
+  .langs button.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+  label { display: block; font-weight: 600; margin-bottom: 0.3rem; }
+  .field { margin-bottom: 12px; }
+  .row { display: flex; gap: 8px; }
+  .row > input { flex: 1; min-width: 0; }
+  input, select { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 0 10px; min-height: 44px; width: 100%; }
+  input:focus-visible, select:focus-visible, button:focus-visible, summary:focus-visible, .hit:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px; }
+  button { font: inherit; min-height: 44px; padding: 0 14px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; width: 100%; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .status { min-height: 1.4em; margin: 10px 0 0; }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--err); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 8px 4px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 0.9rem; }
+  td.num, th.num { text-align: right; }
+  tr.new td { background: var(--new); }
+  tfoot td { font-weight: 600; border-bottom: none; }
+  tfoot tr:first-child td { border-top: 2px solid var(--line); }
+  .empty { color: var(--muted); }
+  .pager { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+  .pager span { color: var(--muted); font-size: 0.9rem; text-align: center; }
+  summary { cursor: pointer; font-weight: 600; min-height: 32px; }
+  details[open] summary { margin-bottom: 10px; }
+  .hint { color: var(--muted); font-size: 0.85rem; margin: 0.3rem 0 0; }
+
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+  .head h2 { margin: 0; }
+  .head select { width: auto; min-height: 36px; }
+  .usage-sum { margin: 0 0 6px; }
+  .usage-sum strong { font-size: 1.25rem; }
+  .usage-sum span { color: var(--muted); }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0 0 6px; font-size: 0.85rem; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px 2px 0 0; background: var(--bar); }
+  .legend i.t { width: 14px; height: 2px; border-radius: 1px; background: var(--temp); }
+  .chart { position: relative; height: 170px; }
+  .chart.with-temp { height: 210px; }
+  .chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
+  .chart .grid { stroke: var(--line); stroke-width: 1; shape-rendering: crispEdges; }
+  .chart .tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .chart .val { fill: var(--text); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums;
+    stroke: var(--card); stroke-width: 3px; stroke-linejoin: round; paint-order: stroke; }
+  .chart .bar { fill: var(--bar); }
+  .chart .bar.on { opacity: 0.7; }
+  .chart .thalo { fill: none; stroke: var(--card); stroke-width: 6; stroke-linejoin: round; stroke-linecap: round; }
+  .chart .tline { fill: none; stroke: var(--temp); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .chart .tdot { fill: var(--temp); stroke: var(--card); stroke-width: 3; paint-order: stroke; }
+  .chart .tmark { fill: var(--temp); stroke: var(--card); stroke-width: 2; }
+  .chart .hit { fill: transparent; outline: none; }
+  .chart .msg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); text-align: center; pointer-events: none; }
+  .chart .msg span { background: var(--card); border-radius: 4px; padding: 2px 6px; }
+  .tip { position: absolute; pointer-events: none; z-index: 1; white-space: nowrap; font-size: 0.85rem;
+    background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px;
+    transform: translate(-50%, calc(-100% - 6px)); box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15); }
+  .tip strong { display: block; font-size: 0.95rem; }
+  .tip span { display: block; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 data-i18n="title">Hopper refills</h1>
+    <div class="langs" id="langs">
+      <button type="button" data-lang="en">EN</button><button type="button" data-lang="sl">SL</button><button type="button" data-lang="pl">PL</button>
+    </div>
+  </header>
+
+  <form id="entry" class="card" novalidate>
+    <div class="field">
+      <label for="time" data-i18n="time">Time</label>
+      <div class="row">
+        <input type="datetime-local" id="time" step="60" required>
+        <button type="button" id="now" data-i18n="now">Now</button>
+      </div>
+    </div>
+    <div class="field">
+      <label for="bags" data-i18n="bags">Bags</label>
+      <input type="number" id="bags" min="1" max="100" step="1" value="1" inputmode="numeric" required>
+    </div>
+    <button type="submit" id="save" class="primary" data-i18n="save">Save</button>
+    <p id="status" class="status" role="status"></p>
+  </form>
+
+  <section class="card" aria-labelledby="usageTitle">
+    <div class="head">
+      <h2 id="usageTitle" data-i18n="usage">Usage</h2>
+      <select id="period" data-i18n-aria="period">
+        <option value="d7" data-i18n="d7">7 days</option>
+        <option value="d14" data-i18n="d14">14 days</option>
+        <option value="d30" data-i18n="d30" selected>30 days</option>
+        <option value="w13" data-i18n="w13">13 weeks</option>
+        <option value="m12" data-i18n="m12">12 months</option>
+      </select>
+    </div>
+    <p id="usageSum" class="usage-sum"></p>
+    <p id="legend" class="legend" hidden><span><i></i><b data-i18n="legend_kg" style="font-weight:inherit">usage (kg, left axis)</b></span><span><i class="t"></i><b data-i18n="legend_t" style="font-weight:inherit">daily max temperature (°C, right axis)</b></span></p>
+    <div id="chart" class="chart"></div>
+    <p id="usageNote" class="hint"></p>
+  </section>
+
+  <section class="card">
+    <h2 id="listTitle" data-i18n="entries">Entries</h2>
+    <table>
+      <thead><tr><th data-i18n="time">Time</th><th class="num" data-i18n="bags">Bags</th><th class="num">kg</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="3" class="empty" data-i18n="loading">Loading…</td></tr></tbody>
+      <tfoot id="foot"></tfoot>
+    </table>
+    <div class="pager">
+      <button type="button" id="newer" data-i18n="newer">‹ Newer</button>
+      <span id="range"></span>
+      <button type="button" id="older" data-i18n="older">Older ›</button>
+    </div>
+  </section>
+
+  <details id="settings" class="card">
+    <summary data-i18n="settings">Settings</summary>
+    <form id="settingsForm" novalidate>
+      <div class="field">
+        <label for="url" data-i18n="url">Webhook URL</label>
+        <input type="url" id="url" placeholder="https://n8n.example.com/webhook/refills" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="token" data-i18n="token">Token (X-Token)</label>
+        <input type="password" id="token" autocomplete="off">
+        <p class="hint" data-i18n="token_hint">Stored in this browser only.</p>
+      </div>
+      <div class="field">
+        <label for="kg" data-i18n="kg">Bag weight (kg)</label>
+        <input type="number" id="kg" min="0.5" max="100" step="0.5" inputmode="decimal">
+      </div>
+      <button type="submit" data-i18n="save_settings">Save settings</button>
+    </form>
+  </details>
+</main>
+
+<script>
+// Default webhook URL, e.g. "https://n8n.example.com/webhook/refills"; Settings override it.
+const WEBHOOK_URL = "";
+const KG_PER_BAG = 15;  // default bag weight; Settings override it
+const PAGE = 20;        // entries per list page
+const MIN_DAYS = 30;    // days the page reads at least (the webhook's default); 13 weeks and 12 months read more
+const TEMP_SOURCE = "Open-Meteo.com";  // source of the temperature, named in the note under the chart
+const TEMP_PLACE = "";  // where it was taken, e.g. "Vienna"; shown in that note when set
+const RANGES = {
+  d7: { kind: "day", n: 7 }, d14: { kind: "day", n: 14 }, d30: { kind: "day", n: 30 },
+  w13: { kind: "week", n: 13 }, m12: { kind: "month", n: 12 },
+};
+const DAY = 24 * 3600 * 1000;
+const SVG = "http://www.w3.org/2000/svg";
+
+// ---- languages: ?lang=, else the language chosen in dash.html or here (dashLang), else the browser's ----
+const TEXT = {
+  en: {
+    title: "Hopper refills", time: "Time", now: "Now", bags: "Bags", save: "Save", usage: "Usage", period: "Period",
+    d7: "7 days", d14: "14 days", d30: "30 days", w13: "13 weeks", m12: "12 months",
+    legend_kg: "usage (kg, left axis)", legend_t: "daily max temperature (°C, right axis)",
+    entries: "Entries", loading: "Loading…", newer: "‹ Newer", older: "Older ›", settings: "Settings",
+    url: "Webhook URL", token: "Token (X-Token)", token_hint: "Stored in this browser only.", kg: "Bag weight (kg)",
+    save_settings: "Save settings",
+    need_cfg: "Enter the webhook URL and token under Settings.", bad_url: "Invalid webhook URL: @url",
+    unreachable: "Webhook not reachable (@url). Check the URL and that the workflow is active.",
+    bad_token: "Wrong token (X-Token).", http_error: "Error @status",
+    no_entries: "No entries in this period.", range: "@a–@b of @n",
+    total_page: "Total on this page", total_period: "Total in the period", total: "Total",
+    list_failed: "Couldn't load the list.", data_failed: "Couldn't load the data.",
+    t_max: "max @t °C", t_avg: "avg. max @t °C", avg: "average @v kg/day",
+    note: "From the refill entries; 1 bag ≈ @kg kg (Settings).",
+    note_t: " Temperature: daily max@place, @src.", note_t_week: " Temperature: daily max@place, @src, averaged per week.",
+    note_t_month: " Temperature: daily max@place, @src, averaged per month.",
+    chart_aria: "Usage from @from to @to: @kg", chart_aria_t: "; with the daily max temperature",
+    enter_time: "Enter a time.", bags_range: "Bags: a whole number from 1 to 100.", saving: "Saving…",
+    saved: "Saved: @time, @bags (@kg).", kg_range: "Bag weight: a number from 0.5 to 100 kg.",
+    settings_saved: "Settings saved.",
+  },
+  sl: {
+    title: "Polnjenje zalogovnika", time: "Čas", now: "Zdaj", bags: "Vreče", save: "Shrani", usage: "Poraba", period: "Obdobje",
+    d7: "7 dni", d14: "14 dni", d30: "30 dni", w13: "13 tednov", m12: "12 mesecev",
+    legend_kg: "poraba (kg, leva os)", legend_t: "najvišja temperatura (°C, desna os)",
+    entries: "Vnosi", loading: "Nalagam …", newer: "‹ Novejši", older: "Starejši ›", settings: "Nastavitve",
+    url: "URL webhooka", token: "Žeton (X-Token)", token_hint: "Shranjen samo v tem brskalniku.", kg: "Teža vreče (kg)",
+    save_settings: "Shrani nastavitve",
+    need_cfg: "V Nastavitvah vpiši URL webhooka in žeton.", bad_url: "URL webhooka ni veljaven: @url",
+    unreachable: "Webhook ni dosegljiv (@url). Preveri URL in ali je workflow aktiven.",
+    bad_token: "Napačen žeton (X-Token).", http_error: "Napaka @status",
+    no_entries: "V tem obdobju ni vnosov.", range: "@a–@b od @n",
+    total_page: "Skupaj na strani", total_period: "Skupaj v obdobju", total: "Skupaj",
+    list_failed: "Seznama ni bilo mogoče naložiti.", data_failed: "Podatkov ni bilo mogoče naložiti.",
+    t_max: "najvišja @t °C", t_avg: "povpr. najvišja @t °C", avg: "povprečno @v kg/dan",
+    note: "Po vnosih polnjenja; 1 vreča ≈ @kg kg (Nastavitve).",
+    note_t: " Temperatura: najvišja dnevna@place, @src.", note_t_week: " Temperatura: najvišja dnevna@place, @src, povprečje po tednih.",
+    note_t_month: " Temperatura: najvišja dnevna@place, @src, povprečje po mesecih.",
+    chart_aria: "Poraba od @from do @to: @kg", chart_aria_t: "; z najvišjo dnevno temperaturo",
+    enter_time: "Vpiši čas.", bags_range: "Vreče: celo število od 1 do 100.", saving: "Shranjujem …",
+    saved: "Shranjeno: @time, @bags (@kg).", kg_range: "Teža vreče: število od 0,5 do 100 kg.",
+    settings_saved: "Nastavitve shranjene.",
+  },
+  pl: {
+    title: "Napełnianie zasobnika", time: "Czas", now: "Teraz", bags: "Worki", save: "Zapisz", usage: "Zużycie", period: "Okres",
+    d7: "7 dni", d14: "14 dni", d30: "30 dni", w13: "13 tygodni", m12: "12 miesięcy",
+    legend_kg: "zużycie (kg, lewa oś)", legend_t: "temperatura maksymalna (°C, prawa oś)",
+    entries: "Wpisy", loading: "Wczytywanie…", newer: "‹ Nowsze", older: "Starsze ›", settings: "Ustawienia",
+    url: "URL webhooka", token: "Token (X-Token)", token_hint: "Zapisany tylko w tej przeglądarce.", kg: "Waga worka (kg)",
+    save_settings: "Zapisz ustawienia",
+    need_cfg: "Wpisz URL webhooka i token w Ustawieniach.", bad_url: "Nieprawidłowy URL webhooka: @url",
+    unreachable: "Webhook nieosiągalny (@url). Sprawdź URL i czy workflow jest aktywny.",
+    bad_token: "Błędny token (X-Token).", http_error: "Błąd @status",
+    no_entries: "Brak wpisów w tym okresie.", range: "@a–@b z @n",
+    total_page: "Razem na stronie", total_period: "Razem w okresie", total: "Razem",
+    list_failed: "Nie udało się wczytać listy.", data_failed: "Nie udało się wczytać danych.",
+    t_max: "maks. @t °C", t_avg: "śr. maks. @t °C", avg: "średnio @v kg/dzień",
+    note: "Według wpisów napełniania; 1 worek ≈ @kg kg (Ustawienia).",
+    note_t: " Temperatura: maksymalna dobowa@place, @src.", note_t_week: " Temperatura: maksymalna dobowa@place, @src, średnia tygodniowa.",
+    note_t_month: " Temperatura: maksymalna dobowa@place, @src, średnia miesięczna.",
+    chart_aria: "Zużycie od @from do @to: @kg", chart_aria_t: "; z temperaturą maksymalną",
+    enter_time: "Wpisz czas.", bags_range: "Worki: liczba całkowita od 1 do 100.", saving: "Zapisywanie…",
+    saved: "Zapisano: @time, @bags (@kg).", kg_range: "Waga worka: liczba od 0,5 do 100 kg.",
+    settings_saved: "Ustawienia zapisane.",
+  },
+};
+const BAG_FORMS = {  // by Intl.PluralRules category, as in dash.html
+  en: { one: "bag", other: "bags" },
+  sl: { one: "vreča", two: "vreči", few: "vreče", other: "vreč" },
+  pl: { one: "worek", few: "worki", many: "worków", other: "worka" },
+};
+
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* private window: lasts until the page closes */ } },
+};
+
+let lang = [new URLSearchParams(location.search).get("lang"), store.get("dashLang"), (navigator.language || "").slice(0, 2)]
+  .find((l) => l in TEXT) || "en";
+let locale = lang, nf = null;
+function tr(key, vars = {}) {
+  let s = TEXT[lang][key] ?? TEXT.en[key] ?? key;
+  for (const [k, v] of Object.entries(vars)) s = s.split(`@${k}`).join(v);
+  return s;
+}
+
+const memory = {};
+const cfg = () => ({
+  url: memory.url ?? (store.get("refillUrl") || WEBHOOK_URL),
+  token: memory.token ?? store.get("refillToken"),
+});
+const kgPerBag = () => {
+  const v = Number(memory.kg ?? store.get("refillKg"));
+  return v > 0 ? v : KG_PER_BAG;
+};
+
+let offset = 0, timeTouched = false, lastId = null, status = null;
+let pageItems = [], periodItems = [], allItems = null, loadedDays = 0;  // allItems: entries of the last loadedDays days
+let temps = new Map();  // "2026-10-31" -> daily max temperature in °C
+
+const pad = (n) => String(n).padStart(2, "0");
+const isoDay = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const localInput = (d) => `${isoDay(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const dm = (d) => d.toLocaleDateString(locale, { day: "numeric", month: "numeric" });
+const dmy = (d) => d.toLocaleDateString(locale, { day: "numeric", month: "numeric", year: "numeric" });
+function fmtTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return iso ?? "–";
+  return d.toLocaleString(locale, { day: "numeric", month: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+function bagsText(n) {
+  const forms = BAG_FORMS[lang] || BAG_FORMS.en;
+  return `${nf.format(n)} ${forms[new Intl.PluralRules(lang).select(n)] ?? forms.other}`;
+}
+const kgText = (b) => `${nf.format(b * kgPerBag())} kg`;
+const sumBags = (list) => list.reduce((s, it) => s + (Number(it.bags) || 0), 0);
+function setNow() { $("time").value = localInput(new Date()); timeTouched = false; }
+// status: a translatable message, so a language switch can show it again
+function setStatus(key, vars, kind = "") {
+  status = key ? { key, vars, kind } : null;
+  $("status").textContent = key ? tr(key, vars) : "";
+  $("status").className = `status ${kind}`;
+}
+function openSettings() { $("settings").open = true; }
+
+class PageError extends Error {
+  constructor(key, vars) { super(key); this.key = key; this.vars = vars; }
+}
+const showError = (e) => (e instanceof PageError ? setStatus(e.key, e.vars, "err") : setStatus("http_error", { status: e.message }, "err"));
+
+async function call(method, query, body) {
+  const { url, token } = cfg();
+  if (!url || !token) {
+    openSettings();
+    throw new PageError("need_cfg");
+  }
+  let u;
+  try { u = new URL(url); } catch { openSettings(); throw new PageError("bad_url", { url }); }
+  for (const [k, v] of Object.entries(query || {})) u.searchParams.set(k, v);
+  let res;
+  try {
+    res = await fetch(u, {
+      method, cache: "no-store",
+      headers: body ? { "X-Token": token, "Content-Type": "application/json" } : { "X-Token": token },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    throw new PageError("unreachable", { url: u.origin + u.pathname });
+  }
+  let data = null;
+  try { data = await res.json(); } catch { /* not JSON */ }
+  if (res.status === 401 || res.status === 403) { openSettings(); throw new PageError("bad_token"); }
+  if (!res.ok) throw new PageError("http_error", { status: `${res.status}${data?.error ? `: ${data.error}` : data?.message ? `: ${data.message}` : ""}` });
+  return data;
+}
+
+// ---- list ----
+
+function cell(text, cls) {
+  const td = document.createElement("td");
+  if (cls) td.className = cls;
+  td.textContent = text;
+  return td;
+}
+
+function emptyRow(text) {
+  $("rows").innerHTML = '<tr><td colspan="3" class="empty"></td></tr>';
+  $("rows").querySelector("td").textContent = text;
+}
+
+function render(items) {
+  pageItems = items;
+  const rows = $("rows");
+  rows.replaceChildren();
+  if (!items.length) emptyRow(tr("no_entries"));
+  for (const it of items) {
+    const row = document.createElement("tr");
+    if (lastId != null && it.id === lastId) row.className = "new";
+    const n = Number(it.bags);
+    row.append(cell(fmtTime(it.time)), cell(it.bags ?? "–", "num"), cell(Number.isFinite(n) ? nf.format(n * kgPerBag()) : "–", "num"));
+    rows.append(row);
+  }
+  const n = periodItems.length;
+  $("range").textContent = n ? tr("range", { a: offset + 1, b: offset + items.length, n }) : "";
+  $("newer").disabled = offset === 0;
+  $("older").disabled = offset + items.length >= n;
+  renderTotals();
+}
+
+function renderTotals() {
+  const foot = $("foot");
+  foot.replaceChildren();
+  if (!pageItems.length) return;
+  const row = (label, b) => {
+    const r = document.createElement("tr");
+    r.append(cell(label), cell(nf.format(b), "num"), cell(nf.format(b * kgPerBag()), "num"));
+    foot.append(r);
+  };
+  if (periodItems.length > pageItems.length) {
+    row(tr("total_page"), sumBags(pageItems));
+    row(tr("total_period"), sumBags(periodItems));
+  } else {
+    row(tr("total"), sumBags(pageItems));
+  }
+}
+
+let listMsg = null;  // the key of a message shown instead of the list
+function listError(key) {
+  listMsg = key;
+  pageItems = [];
+  emptyRow(tr(key));
+  $("foot").replaceChildren();
+  $("range").textContent = "";
+}
+
+const curRange = () => RANGES[$("period").value] ?? RANGES.d30;
+function daysNeeded(range) {  // days from the start of the period to today, today included
+  const now = new Date();
+  return Math.round((new Date(now.getFullYear(), now.getMonth(), now.getDate()) - buckets(range)[0].s) / DAY) + 1;
+}
+
+// One call: entries and temperatures of the last `days` days, for the list and the chart.
+async function load(days = Math.max(MIN_DAYS, daysNeeded(curRange()))) {
+  $("newer").disabled = $("older").disabled = true;
+  try {
+    const data = await call("GET", { days });
+    allItems = Array.isArray(data?.items) ? data.items : [];
+    loadedDays = days;
+    temps = new Map((Array.isArray(data?.temperature) ? data.temperature : [])
+      .filter((r) => typeof r?.date === "string" && r.tmax != null && Number.isFinite(Number(r.tmax)))
+      .map((r) => [r.date.slice(0, 10), Number(r.tmax)]));
+  } catch (e) {
+    allItems = null;
+    listError("list_failed");
+    chartMessage("data_failed");
+    showError(e);
+    return;
+  }
+  listMsg = chartMsg = null;
+  renderChart();
+  showPage();
+}
+
+// List: the entries of the chosen period, PAGE per page, from the data already read.
+function showPage() {
+  if (!allItems) return;
+  const from = buckets(curRange())[0].s;
+  periodItems = allItems.filter((it) => new Date(it.time) >= from);
+  $("listTitle").textContent = `${tr("entries")} · ${$("period").selectedOptions[0].text}`;
+  offset = Math.max(0, Math.min(offset, Math.floor((periodItems.length - 1) / PAGE) * PAGE));
+  render(periodItems.slice(offset, offset + PAGE));
+}
+
+// ---- usage chart ----
+
+function buckets(range) {
+  const now = new Date();
+  const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
+  const out = [];
+  for (let i = range.n - 1; i >= 0; i--) {
+    let s, e;
+    if (range.kind === "month") {
+      s = new Date(y, m - i, 1); e = new Date(y, m - i + 1, 1);
+    } else {
+      const step = range.kind === "week" ? 7 : 1;
+      s = new Date(y, m, d - i * step - (step - 1)); e = new Date(s.getFullYear(), s.getMonth(), s.getDate() + step);
+    }
+    out.push({ s, e, b: 0 });
+  }
+  return out;
+}
+
+function bucketLabel(range, k, full) {
+  if (range.kind === "month")
+    return k.s.toLocaleDateString(locale, full ? { month: "long", year: "numeric" } : { month: "short" });
+  if (range.kind === "week") {
+    const last = new Date(k.e.getFullYear(), k.e.getMonth(), k.e.getDate() - 1);
+    return full ? `${dm(k.s)}–${dmy(last)}` : dm(k.s);
+  }
+  return full ? dmy(k.s) : dm(k.s);
+}
+
+function niceStep(max) {
+  for (const s of [5, 10, 15, 20, 25, 30, 50, 75, 100, 150, 200, 250, 300, 500, 750, 1000, 1500, 2000, 2500, 5000])
+    if (Math.ceil(max / s) <= 4) return s;
+  return Math.ceil(max / 4 / 1000) * 1000;
+}
+
+function tempScale(vals, n) {  // right axis: as many steps as the kg axis, so they share the grid; line kept central
+  const lo0 = Math.min(...vals), hi0 = Math.max(...vals);
+  for (const step of [1, 2, 5, 10, 20, 50]) {
+    const span = n * step;
+    const min = Math.ceil((hi0 - span) / step) * step, max = Math.floor(lo0 / step) * step;  // allowed lower ends
+    if (min > max) continue;
+    const lo = Math.min(max, Math.max(min, Math.round(((lo0 + hi0 - span) / 2) / step) * step)) || 0;  // no -0
+    return { lo, hi: lo + span, step };
+  }
+  const lo = Math.floor(lo0), step = Math.ceil((hi0 - lo) / n) || 1;
+  return { lo, hi: lo + n * step, step };
+}
+
+function svgEl(tag, attrs, parent) {
+  const el = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  parent?.append(el);
+  return el;
+}
+
+let chartMsg = null;  // the key of a message shown instead of the chart
+function chartMessage(key) {
+  chartMsg = key;
+  $("chart").replaceChildren();
+  $("chart").classList.remove("with-temp");
+  $("legend").hidden = true;
+  const msg = document.createElement("div");
+  msg.className = "msg";
+  msg.textContent = tr(key);
+  $("chart").append(msg);
+  $("usageSum").textContent = "";
+  $("usageNote").textContent = "";
+}
+
+function renderChart() {
+  if (!allItems) return;
+  const kg = kgPerBag();
+  const range = curRange();
+  const bs = buckets(range);
+  const from = bs[0].s, to = bs[bs.length - 1].e;
+  for (const it of allItems) {
+    const t = new Date(it.time);
+    if (isNaN(t) || t < from || t >= to) continue;
+    const k = bs.find((x) => t >= x.s && t < x.e);
+    if (k) k.b += Number(it.bags) || 0;
+  }
+  for (const k of bs) {  // daily max temperature; for weeks and months the mean of the days we have
+    let s = 0, n = 0;
+    for (let d = k.s; d < k.e; d = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1)) {
+      const v = temps.get(isoDay(d));
+      if (v != null) { s += v; n++; }
+    }
+    k.t = n ? s / n : null;
+  }
+  const hasT = bs.some((k) => k.t != null);
+  const tText = (k) => tr(range.kind === "day" ? "t_max" : "t_avg", { t: nf.format(k.t) });
+  const sumB = bs.reduce((s, k) => s + k.b, 0);
+  const now = new Date();
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  const days = Math.max(1, Math.round((Math.min(to, tomorrow) - from) / DAY));
+  const last = new Date(Math.min(to, tomorrow) - DAY / 2);
+
+  const sum = $("usageSum");
+  sum.replaceChildren();
+  const strong = document.createElement("strong");
+  strong.textContent = kgText(sumB);
+  const rest = document.createElement("span");
+  const period = `${from.getFullYear() === last.getFullYear() ? dm(from) : dmy(from)}–${dmy(last)}`;
+  rest.textContent = ` · ${bagsText(sumB)} · ${tr("avg", { v: nf.format((sumB * kg) / days) })} · ${period.replace(/ /g, " ")}`;
+  sum.append(strong, rest);
+  $("usageNote").textContent = tr("note", { kg: nf.format(kg) })
+    + (hasT ? tr(range.kind === "day" ? "note_t" : range.kind === "week" ? "note_t_week" : "note_t_month",
+                 { place: TEMP_PLACE ? ` (${TEMP_PLACE})` : "", src: TEMP_SOURCE }) : "");
+  $("legend").hidden = !hasT;
+
+  // One chart: kg bars on the left axis, temperature on the right. The right axis has as many steps as the left, so they share the grid.
+  const box = $("chart");
+  box.replaceChildren();
+  box.classList.toggle("with-temp", hasT);
+  const W = box.clientWidth || 320, H = box.clientHeight || (hasT ? 210 : 170);
+  const maxKg = Math.max(...bs.map((k) => k.b * kg));
+  const step = niceStep(Math.max(maxKg, kg));
+  const yMax = Math.ceil(Math.max(maxKg, kg) / step) * step;
+  const ticks = [];
+  for (let v = 0; v <= yMax + 1e-9; v += step) ticks.push([v, nf.format(v) + (v + step > yMax + 1e-9 ? " kg" : "")]);
+  const ts = hasT ? tempScale(bs.filter((k) => k.t != null).map((k) => k.t), Math.round(yMax / step)) : null;
+  const tTicks = [];
+  if (ts) for (let v = ts.lo; v <= ts.hi + 1e-9; v += ts.step) tTicks.push([v, nf.format(v) + (v + ts.step > ts.hi + 1e-9 ? " °C" : "")]);
+  const axisW = (list) => Math.max(28, 8 + 6.5 * Math.max(...list.map((t) => t[1].length)));
+  const M = { l: axisW(ticks), r: ts ? axisW(tTicks) : 4, t: 18, b: 22 };
+  const pw = W - M.l - M.r;
+  const ph = H - M.t - M.b;
+  const y0 = M.t + ph;
+  const yOf = (v) => y0 - (v / yMax) * ph;
+  const yT = (v) => y0 - ((v - ts.lo) / (ts.hi - ts.lo)) * ph;
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img",
+    "aria-label": tr("chart_aria", { from: dmy(from), to: dmy(last), kg: kgText(sumB) }) + (hasT ? tr("chart_aria_t") : "") }, box);
+
+  for (const [v, text] of ticks) {
+    const y = Math.round(yOf(v)) + 0.5;
+    svgEl("line", { class: "grid", x1: M.l, x2: W - M.r, y1: y, y2: y }, svg);
+    svgEl("text", { class: "tick", x: M.l - 6, y: y + 4, "text-anchor": "end" }, svg).textContent = text;
+  }
+  for (const [v, text] of tTicks)  // on the same grid lines as kg
+    svgEl("text", { class: "tick", x: W - M.r + 6, y: Math.round(yT(v)) + 4.5, "text-anchor": "start" }, svg).textContent = text;
+
+  const band = pw / bs.length;
+  const cxOf = (i) => M.l + i * band + band / 2;
+  const hOf = (k) => (k.b * kg / yMax) * ph;
+  const bw = Math.max(2, Math.min(24, band - 2));
+  const every = Math.ceil(bs.length / Math.max(2, Math.floor(pw / (range.kind === "month" ? 40 : 56))));
+  let maxI = -1;
+  bs.forEach((k, i) => { if (k.b > 0 && (maxI < 0 || k.b > bs[maxI].b)) maxI = i; });
+
+  const bars = bs.map((k, i) => {
+    const cx = cxOf(i);
+    if ((bs.length - 1 - i) % every === 0) {
+      const anchor = i === bs.length - 1 && band < 40 ? "end" : "middle";
+      svgEl("text", { class: "tick", x: anchor === "end" ? M.l + pw : cx, y: H - 6, "text-anchor": anchor }, svg)
+        .textContent = bucketLabel(range, k, false);
+    }
+    const h = hOf(k);
+    if (h <= 0) return null;
+    const x = cx - bw / 2, y = y0 - h, r = Math.min(4, bw / 2, h);
+    return svgEl("path", { class: "bar", d: `M${x},${y0}V${y + r}Q${x},${y} ${x + r},${y}H${x + bw - r}Q${x + bw},${y} ${x + bw},${y + r}V${y0}Z` }, svg);
+  });
+
+  let mark = null;
+  if (ts) {  // the line above the bars, broken where there's no temperature; a lone day is a dot
+    let d = "";
+    const dots = [];
+    bs.forEach((k, i) => {
+      if (k.t == null) return;
+      d += `${bs[i - 1]?.t != null ? "L" : "M"}${cxOf(i).toFixed(1)},${yT(k.t).toFixed(1)}`;
+      if (bs[i - 1]?.t == null && bs[i + 1]?.t == null) dots.push(i);
+    });
+    svgEl("path", { class: "thalo", d }, svg);
+    svgEl("path", { class: "tline", d }, svg);
+    for (const i of dots) svgEl("circle", { class: "tdot", cx: cxOf(i), cy: yT(bs[i].t), r: 3 }, svg);
+    mark = svgEl("circle", { class: "tmark", r: 4, visibility: "hidden" }, svg);
+  }
+  if (maxI >= 0)
+    svgEl("text", { class: "val", x: cxOf(maxI), y: y0 - hOf(bs[maxI]) - 4, "text-anchor": "middle" }, svg).textContent = nf.format(bs[maxI].b * kg);
+
+  const tip = document.createElement("div");
+  tip.className = "tip";
+  tip.hidden = true;
+  box.append(tip);
+
+  bs.forEach((k, i) => {
+    const cx = cxOf(i), bar = bars[i];
+    const label = `${bucketLabel(range, k, true)}: ${kgText(k.b)}, ${bagsText(k.b)}${k.t != null ? `, ${tText(k)}` : ""}`;
+    const hit = svgEl("rect", { class: "hit", x: M.l + i * band, y: M.t, width: band, height: H - M.t,
+      tabindex: 0, "aria-label": label }, svg);
+    const show = () => {
+      bar?.classList.add("on");
+      tip.replaceChildren();
+      const v = document.createElement("strong");
+      v.textContent = kgText(k.b);
+      const s = document.createElement("span");
+      s.textContent = `${bagsText(k.b)} · ${bucketLabel(range, k, true)}`;
+      tip.append(v, s);
+      let y = y0 - hOf(k);
+      if (k.t != null) {
+        const t = document.createElement("span");
+        t.textContent = tText(k);
+        tip.append(t);
+        mark.setAttribute("cx", cx);
+        mark.setAttribute("cy", yT(k.t));
+        mark.setAttribute("visibility", "visible");
+        y = Math.min(y, yT(k.t) - 4);
+      }
+      tip.hidden = false;
+      const half = tip.offsetWidth / 2;
+      tip.style.left = `${Math.min(Math.max(cx, half), W - half)}px`;
+      tip.style.top = `${y}px`;  // above the higher of the two marks
+    };
+    const hide = () => { bar?.classList.remove("on"); mark?.setAttribute("visibility", "hidden"); tip.hidden = true; };
+    hit.addEventListener("pointerenter", show);
+    hit.addEventListener("pointerleave", hide);
+    hit.addEventListener("focus", show);
+    hit.addEventListener("blur", hide);
+  });
+
+  if (!sumB) {
+    const msg = document.createElement("div");
+    msg.className = "msg";
+    const s = document.createElement("span");
+    s.textContent = tr("no_entries");
+    msg.append(s);
+    msg.style.top = `${M.t}px`;
+    msg.style.bottom = `${M.b}px`;
+    if (ts) { msg.style.alignItems = "end"; msg.style.paddingBottom = "6px"; }  // above the axis, the temperature line stays visible
+    box.append(msg);
+  }
+}
+
+// ---- language ----
+
+function setLang(l) {
+  lang = l in TEXT ? l : "en";
+  const browser = navigator.language || "";
+  locale = browser.slice(0, 2) === lang ? browser : lang;  // e.g. en-GB dates for a British browser
+  nf = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
+  store.set("dashLang", lang);
+  document.documentElement.lang = lang;
+  document.title = tr("title");
+  for (const b of document.querySelectorAll("[data-lang]")) b.classList.toggle("on", b.dataset.lang === lang);
+  for (const el of document.querySelectorAll("[data-i18n]")) el.textContent = tr(el.dataset.i18n);
+  for (const el of document.querySelectorAll("[data-i18n-aria]")) el.setAttribute("aria-label", tr(el.dataset.i18nAria));
+  if (status) setStatus(status.key, status.vars, status.kind);
+  if (chartMsg) chartMessage(chartMsg); else renderChart();
+  if (listMsg) listError(listMsg); else showPage();
+}
+
+// ---- events ----
+
+$("entry").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!timeTouched) setNow();  // the page may have been open for a long time
+  const d = new Date($("time").value);
+  const n = Number($("bags").value);
+  if (!$("time").value || isNaN(d)) return setStatus("enter_time", {}, "err");
+  if (!Number.isInteger(n) || n < 1 || n > 100) return setStatus("bags_range", {}, "err");
+  $("save").disabled = true;
+  setStatus("saving");
+  try {
+    const saved = await call("POST", null, { time: d.toISOString(), bags: n });
+    lastId = saved?.id ?? null;
+    const b = Number(saved?.bags ?? n);
+    setStatus("saved", { time: fmtTime(saved?.time ?? d.toISOString()), bags: bagsText(b), kg: kgText(b) }, "ok");
+    setNow();
+    $("bags").value = 1;
+    offset = 0;
+    await load();
+  } catch (err) {
+    showError(err);
+  } finally {
+    $("save").disabled = false;
+  }
+});
+
+$("time").addEventListener("input", () => { timeTouched = true; });
+$("now").addEventListener("click", setNow);
+$("newer").addEventListener("click", () => { offset = Math.max(0, offset - PAGE); showPage(); });
+$("older").addEventListener("click", () => { offset += PAGE; showPage(); });
+$("langs").addEventListener("click", (e) => { if (e.target.dataset.lang) setLang(e.target.dataset.lang); });
+$("period").addEventListener("change", () => {
+  store.set("refillPeriod", $("period").value);
+  offset = 0;
+  if (allItems && daysNeeded(curRange()) > loadedDays) return load();  // a longer period: read more days
+  renderChart();
+  showPage();
+});
+document.addEventListener("visibilitychange", () => { if (!document.hidden && !timeTouched) setNow(); });
+let lastWidth = 0;
+new ResizeObserver(() => {
+  const w = $("chart").clientWidth;
+  if (w !== lastWidth) { lastWidth = w; renderChart(); }
+}).observe($("chart"));
+
+$("settingsForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const url = $("url").value.trim(), token = $("token").value.trim(), kg = Number($("kg").value);
+  try { if (url) new URL(url); } catch { return setStatus("bad_url", { url }, "err"); }
+  if (!(kg >= 0.5 && kg <= 100)) return setStatus("kg_range", {}, "err");
+  const changed = url !== cfg().url || token !== cfg().token;
+  memory.url = url; memory.token = token; memory.kg = kg;
+  store.set("refillUrl", url);
+  store.set("refillToken", token);
+  store.set("refillKg", String(kg));
+  setStatus("settings_saved", {}, "ok");
+  if (pageItems.length) render(pageItems);  // new bag weight
+  renderChart();
+  if (url && token) {
+    $("settings").open = false;
+    if (changed || !allItems) { offset = 0; load(); }
+  }
+});
+
+$("url").value = cfg().url;
+$("token").value = cfg().token;
+$("kg").value = kgPerBag();
+if (RANGES[store.get("refillPeriod")]) $("period").value = store.get("refillPeriod");
+setNow();
+setLang(lang);
+if (!cfg().url || !cfg().token) {
+  openSettings();
+  listError("need_cfg");
+  $("newer").disabled = $("older").disabled = true;
+  chartMessage("need_cfg");
+} else {
+  load();
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,149 @@
+#!/bin/sh
+# Burner state for the SSH login banner, run from /etc/profile.d/econet.sh.
+# Asks the running ecoNET app directly on its local FastCGI port (as econet-set does, so no web
+# password), but in plain sh with nc: the login doesn't wait for Python to start. Gives up after
+# about 2 s if the app doesn't answer.
+#   econet-status                    the banner lines
+#   econet-status --watch [SECONDS]  a timed line each time the state or an output changes, checked
+#                                    every SECONDS (default 1; 0 = without pause, for pulses
+#                                    shorter than a second) until Ctrl-C; to tell which output
+#                                    drives which motor (needs patch-outputs.py for all outputs)
+
+PENDING=/tmp/econet-offafter.json  # written by econet-set while it waits to turn the burner off
+
+# One FastCGI GET of an /econet API method, printed raw (binary record headers included).
+fcgi_get() {
+	method=$1
+	set -- REQUEST_METHOD=GET SCRIPT_NAME=/econet "PATH_INFO=/$method" \
+		SERVER_NAME=127.0.0.1 SERVER_PORT=80 SERVER_PROTOCOL=HTTP/1.0
+	len=0
+	for kv; do len=$((len + ${#kv} + 1)); done  # per pair: 2 length bytes + name + value
+	{
+		printf '\001\001\000\001\000\010\000\000\000\001\000\000\000\000\000\000'  # begin, responder
+		printf "\\001\\004\\000\\001\\$(printf %03o $((len / 256)))\\$(printf %03o $((len % 256)))\\000\\000"
+		for kv; do
+			k=${kv%%=*} v=${kv#*=}
+			printf "\\$(printf %03o ${#k})\\$(printf %03o ${#v})%s%s" "$k" "$v"
+		done
+		printf '\001\004\000\001\000\000\000\000\001\005\000\001\000\000\000\000'  # end params, empty stdin
+	} | nc 127.0.0.1 50007 2>/dev/null &
+	ncpid=$!
+	# OpenWrt's busybox nc has no -w timeout, so stop it after 2 s if the app hangs. The timer's
+	# output goes to /dev/null, or $(...) around this function would wait for it.
+	(sleep 2; kill "$ncpid") >/dev/null 2>&1 &
+	timer=$!
+	wait "$ncpid" 2>/dev/null
+	kill "$timer" 2>/dev/null
+}
+
+num() {  # value, printf format; "-" when missing
+	case $1 in
+	"" | null) printf '%s' - ;;
+	*) printf "$2" "$1" ;;
+	esac
+}
+
+mode_name() {  # ecoNET's label order; 0, 2, 3, 4, 6, 7 and 12 confirmed against a controller's panel
+	case $1 in
+	0) n=Off ;; 1) n=Stopped ;; 2) n="Fire up" ;; 3) n=Work ;; 4) n=Supervision ;; 5) n=Halted ;;
+	6) n=Cleaning ;; 7) n="Burning off" ;; 8) n=Alarm ;; 9) n=Manual ;; 10) n=Unsealing ;; 11) n=Other ;;
+	12) n=Stabilization ;; 13) n=Purge ;; 14) n="Check flame" ;; 15) n="Flame extinguished" ;;
+	16) n=Prevention ;; 17) n="Work grate" ;; 18) n="Supervision grate" ;; 19) n=Calibration ;;
+	20) n="Chimney sweep" ;; 21) n="Open door" ;; *) n=mode ;;
+	esac
+	printf '%s (%s)' "$n" "$1"
+}
+
+# Outputs bits that turn a rotating hearth, as in dash.html. 0 = none: 0x10 and 0x100 keep the names
+# ecoNET 3.2.3879 gives them (circulation pump, exhaust fan). On a Pellas X REVO set 272 (0x10 | 0x100):
+# 0x10 turns the hearth in operation, 0x100 in the panel's manual control.
+HEARTH_BITS=0
+
+# The controller's outputs bits as ecoNET 3.2.3879 names them (docs/dashboard.md#outputs)
+b16=circ-pump b256=exhaust-fan
+[ $((HEARTH_BITS & 16)) -ne 0 ] && b16=hearth
+[ $((HEARTH_BITS & 256)) -ne 0 ] && b256=hearth-manual
+BITS="1:fan 2:feeder 4:CH-pump 8:DHW-pump 16:$b16 32:igniter 64:alarm 128:outer-boiler
+	256:$b256 512:feeder2-additional 1024:feeder-outer 2048:solar-pump 4096:fireplace-pump
+	8192:GZC 16384:blow-fan1 32768:blow-fan2"
+
+bit_names() {  # the names of the bits set in an outputs word; higher bits as hex
+	n=
+	for b in $BITS; do
+		[ $(($1 & ${b%%:*})) -ne 0 ] && n="$n ${b#*:}"
+	done
+	[ $(($1 & ~65535)) -ne 0 ] && n="$n $(printf '0x%x' $(($1 & ~65535)))"
+	printf '%s' "${n# }"
+}
+
+# regParams' "curr" as variables c_<name>; $json stays empty when the app doesn't answer
+read_curr() {
+	# the JSON body: from the first {" (a record header byte can't fake that pair at these sizes) to the last }
+	json=$(fcgi_get regParams | tr -d '\000' |
+		awk '{ i = index($0, "{\""); if (i) { s = substr($0, i); sub(/[^}]*$/, "", s); print s; exit } }')
+	# the numeric fields of "curr" as c_<name>=<value>; only numbers, null, true and false get through
+	eval "$(printf '%s' "$json" | tr ',{}' '\n\n\n' |
+		sed -nE 's/^ *"([A-Za-z0-9]+)": *(-?[0-9.]+|null|true|false) *$/c_\1=\2/p')"
+}
+
+watch_outputs() {
+	every=${1:-1}
+	case $every in "" | *[!0-9]*) echo "SECONDS must be a whole number (0 = no pause)" >&2; exit 2 ;; esac
+	if [ "$every" -eq 0 ]; then
+		echo "A line when the state or an output changes, checked without pause. Ctrl-C stops."
+	else
+		echo "A line when the state or an output changes, checked every $every s. Ctrl-C stops."
+	fi
+	last=
+	while :; do
+		unset c_mode c_outputs c_fanWorks c_feederWorks c_feederOuterWorks c_lighterWorks
+		read_curr
+		if [ -n "$c_mode" ]; then  # the app sometimes answers with an empty "curr": skip that one
+			if [ -n "$c_outputs" ]; then
+				on=$(bit_names "$c_outputs")
+				out="$(printf 'outputs 0x%04x' "$c_outputs"): ${on:-none}"
+			else  # patched before "outputs" was added, or not patched (then all "-")
+				out="fan $(num "$c_fanWorks" %s), feeder $(num "$c_feederWorks" %s)"
+				out="$out, feeder-outer $(num "$c_feederOuterWorks" %s), igniter $(num "$c_lighterWorks" %s)"
+			fi
+			line="$(mode_name "$c_mode")  $out"
+			if [ "$line" != "$last" ]; then
+				echo "$(date +%T)  $line"
+				last=$line
+			fi
+		fi
+		[ "$every" -gt 0 ] && sleep "$every"
+	done
+}
+
+case $1 in
+"") ;;
+--watch) watch_outputs "$2"; exit ;;
+*) echo "usage: econet-status [--watch [SECONDS]]" >&2; exit 2 ;;
+esac
+
+read_curr
+if [ -z "$json" ]; then
+	echo " Burner:  no data, the ecoNET app doesn't answer"
+elif [ -z "$c_mode" ]; then
+	echo " Burner:  no live data from the controller yet"
+else
+	# fuel level: values >= 101 carry an offset of 101 (201 = 100 %), 255 = unknown
+	case $c_fuelLevel in
+	"" | null | 255) fuel=- ;;
+	*) [ "$c_fuelLevel" -ge 101 ] && fuel="$((c_fuelLevel - 101)) %" || fuel="$c_fuelLevel %" ;;
+	esac
+	printf ' Burner:  %-13s boiler %s °C (target %s °C)\n' "$(mode_name "$c_mode")" \
+		"$(num "$c_tempCO" %.1f)" "$(num "$c_tempCOSet" %d)"
+	printf ' Flame:   %-13s output %s kW (%s %%), fan %s %%\n' "$(num "$c_tempOpticalSensor" '%.0f %%')" \
+		"$(num "$c_boilerPowerKW" %.1f)" "$(num "$c_boilerPower" %d)" "$(num "$c_fanPower" %.0f)"
+	printf ' Fuel:    %-13s feed %s kg/h, feeder %s °C, flue gas %s\n' "$fuel" \
+		"$(num "$c_fuelStream" %.1f)" "$(num "$c_tempFeeder" %.1f)" "$(num "$c_tempFlueGas" '%.0f °C')"
+fi
+
+pid=$(sed -n 's/.*"pid": *\([0-9]*\).*/\1/p' "$PENDING" 2>/dev/null)
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+	echo " Turns off after the cycle: waiting since $(sed -n 's/.*"since": *"\([^"]*\)".*/\1/p' "$PENDING")," \
+		"at the latest at $(sed -n 's/.*"until": *"\([^"]*\)".*/\1/p' "$PENDING")"
+fi
+echo " -----------------------------------------------------"

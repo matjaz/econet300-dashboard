@@ -1,0 +1,329 @@
+{
+  "name": "Hopper refills",
+  "nodes": [
+    {
+      "parameters": {
+        "multipleMethods": true,
+        "httpMethod": [
+          "GET",
+          "POST"
+        ],
+        "path": "refills",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "0f1c3a52-6a0e-4c43-9a43-2d0e8c1a7b01",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        200
+      ],
+      "webhookId": "5b3e1f0a-2c7d-4b8e-9f41-8d6a0c2e7a31"
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "refills"
+        },
+        "returnAll": true
+      },
+      "id": "1a2b3c4d-0001-4e5f-8a9b-0c1d2e3f4a01",
+      "name": "Read refills",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        240,
+        80
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "temperature"
+        },
+        "returnAll": true
+      },
+      "id": "1a2b3c4d-0009-4e5f-8a9b-0c1d2e3f4a09",
+      "name": "Read temperatures",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        480,
+        80
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "onError": "continueRegularOutput",
+      "notes": "Filled by the workflow Daily max temperature. Without that table the temperature list is empty."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ?days=N: refills and daily max temperatures of the last N days including today (default 30, 1-400),\n// newest refills first. Days start at midnight in the workflow's timezone (Settings > Timezone; by\n// default the instance's GENERIC_TIMEZONE).\nconst q = $('Webhook').first().json.query || {};\nconst n = parseInt(q.days, 10);\nconst days = Number.isFinite(n) ? Math.min(Math.max(n, 1), 400) : 30;\nconst start = $now.startOf('day').minus({ days: days - 1 });\nconst from = start.toISODate();\nconst fromMs = start.toMillis();\nconst items = $('Read refills').all()\n  .map((i) => i.json)\n  .filter((r) => r.id != null && new Date(r.time).getTime() >= fromMs)  // an empty table gives one empty item\n  .map((r) => ({ id: r.id, time: r.time, bags: r.bags }))\n  .sort((a, b) => new Date(b.time) - new Date(a.time) || b.id - a.id);\n// Daily max temperature from the day `from` on, oldest day first\nconst temps = new Map();\nfor (const { json: r } of $input.all()) {\n  const date = String(r.date ?? '').slice(0, 10);\n  if (/^\\d{4}-\\d\\d-\\d\\d$/.test(date) && date >= from && r.tmax != null && Number.isFinite(Number(r.tmax)))\n    temps.set(date, Number(r.tmax));\n}\nconst temperature = [...temps].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([date, tmax]) => ({ date, tmax }));\nreturn [{ json: { from, days, items, temperature } }];"
+      },
+      "id": "1a2b3c4d-0002-4e5f-8a9b-0c1d2e3f4a02",
+      "name": "Build list",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "1a2b3c4d-0003-4e5f-8a9b-0c1d2e3f4a03",
+      "name": "Reply: list",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        960,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Body: { \"time\": \"2026-11-01T13:14:00.000Z\", \"bags\": 2 }\nconst b = $input.first().json.body || {};\nconst time = typeof b.time === 'string' ? new Date(b.time) : new Date(NaN);\nconst bags = typeof b.bags === 'string' && /^\\s*\\d+\\s*$/.test(b.bags) ? Number(b.bags) : b.bags;\nlet error = '';\nif (isNaN(time)) error = 'time: missing or not a valid time (ISO 8601)';\nelse if (time.getTime() > Date.now() + 24 * 3600 * 1000) error = 'time: more than a day in the future';\nelse if (!Number.isInteger(bags) || bags < 1 || bags > 100) error = 'bags: a whole number from 1 to 100';\nreturn [{ json: error ? { ok: false, error } : { ok: true, time: time.toISOString(), bags } }];"
+      },
+      "id": "1a2b3c4d-0004-4e5f-8a9b-0c1d2e3f4a04",
+      "name": "Check entry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "6c0e9a7e-3d1b-4f57-8b2a-1e4c5d6f7a81",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1a2b3c4d-0005-4e5f-8a9b-0c1d2e3f4a05",
+      "name": "Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        480,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "refills"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "time": "={{ $json.time }}",
+            "bags": "={{ $json.bags }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "time",
+              "displayName": "time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "bags",
+              "displayName": "bags",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "1a2b3c4d-0006-4e5f-8a9b-0c1d2e3f4a06",
+      "name": "Write refill",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        720,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { id: $json.id, time: $json.time, bags: $json.bags } }}",
+        "options": {
+          "responseCode": 201
+        }
+      },
+      "id": "1a2b3c4d-0007-4e5f-8a9b-0c1d2e3f4a07",
+      "name": "Reply: saved",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        960,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { error: $json.error } }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "1a2b3c4d-0008-4e5f-8a9b-0c1d2e3f4a08",
+      "name": "Reply: error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        400
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Read refills",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check entry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read refills": {
+      "main": [
+        [
+          {
+            "node": "Read temperatures",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read temperatures": {
+      "main": [
+        [
+          {
+            "node": "Build list",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build list": {
+      "main": [
+        [
+          {
+            "node": "Reply: list",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check entry": {
+      "main": [
+        [
+          {
+            "node": "Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid?": {
+      "main": [
+        [
+          {
+            "node": "Write refill",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply: error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write refill": {
+      "main": [
+        [
+          {
+            "node": "Reply: saved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
